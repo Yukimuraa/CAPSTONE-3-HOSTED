@@ -173,7 +173,7 @@ $rows_per_page = 10;
 $current_page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
 
 // Get all orders with user details and item information
-$query = "SELECT o.*, u.name as user_name, u.email as user_email, i.name as item_name, i.price as item_price 
+$query = "SELECT o.*, u.name as user_name, u.email as user_email, u.user_type, u.role, i.name as item_name, i.price as item_price 
           FROM orders o 
           JOIN user_accounts u ON o.user_id = u.id 
           JOIN inventory i ON o.inventory_id = i.id";
@@ -207,6 +207,35 @@ if (!empty($where_clauses)) {
 }
 
 $query .= " ORDER BY o.created_at DESC, o.batch_id, o.id";
+
+// Helper function to format user name with role/type
+function formatUserName($user_name, $user_type, $role = null) {
+    $roleLabels = [
+        'student' => 'Student',
+        'faculty' => 'Faculty',
+        'staff' => 'Staff'
+    ];
+    
+    $userTypeLabels = [
+        'admin' => 'BAO Admin',
+        'secretary' => 'BAO Secretary',
+        'staff' => 'Staff',
+        'external' => 'External User'
+    ];
+    
+    // For students, use role if available
+    if ($user_type === 'student' && $role && isset($roleLabels[$role])) {
+        return $user_name . ' (' . $roleLabels[$role] . ')';
+    }
+    
+    // For other user types, use user_type label
+    if (isset($userTypeLabels[$user_type])) {
+        return $user_name . ' (' . $userTypeLabels[$user_type] . ')';
+    }
+    
+    // Fallback
+    return $user_name;
+}
 
 // Get all orders first to count display rows (batches + single orders)
 if (!empty($params)) {
@@ -331,6 +360,8 @@ if (!empty($params)) {
                                 value="<?php echo htmlspecialchars($search); ?>" 
                                 placeholder="Search by Order ID, Batch ID, Customer Name, or Item Name..."
                                 class="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                                onkeypress="return !/[!@#$%^&*()_+={}\[\]:;&quot;'<>?\/\\|`~]/.test(event.key)"
+                                oninput="this.value = this.value.replace(/[!@#$%^&*()_+={}\[\]:;&quot;'<>?\/\\|`~]/g, '')"
                             >
                         </div>
                         <div class="flex gap-2">
@@ -399,7 +430,7 @@ if (!empty($params)) {
                                                         <?php echo $current_batch; ?>
                                                     </td>
                                                     <td class="px-6 py-4 text-sm text-gray-900">
-                                                        <?php echo $first_item['user_name']; ?>
+                                                        <?php echo formatUserName($first_item['user_name'], $first_item['user_type'] ?? 'student', $first_item['role'] ?? null); ?>
                                                     </td>
                                                     <td class="px-6 py-4 text-sm text-gray-500">
                                                         <?php echo count($batch_items); ?> items
@@ -485,7 +516,7 @@ if (!empty($params)) {
                                                         <?php echo $order['order_id']; ?>
                                                     </td>
                                                     <td class="px-6 py-4 text-sm text-gray-900">
-                                                        <?php echo $order['user_name']; ?>
+                                                        <?php echo formatUserName($order['user_name'], $order['user_type'] ?? 'student', $order['role'] ?? null); ?>
                                                     </td>
                                                     <td class="px-6 py-4 text-sm text-gray-500">
                                                         <?php echo $order['item_name']; ?>
@@ -560,7 +591,7 @@ if (!empty($params)) {
                                                 <?php echo $current_batch; ?>
                                             </td>
                                             <td class="px-6 py-4 text-sm text-gray-900">
-                                                <?php echo $first_item['user_name']; ?>
+                                                <?php echo formatUserName($first_item['user_name'], $first_item['user_type'] ?? 'student', $first_item['role'] ?? null); ?>
                                             </td>
                                             <td class="px-6 py-4 text-sm text-gray-500">
                                                 <?php echo count($batch_items); ?> items
@@ -845,6 +876,35 @@ if (!empty($params)) {
         document.getElementById('sidebar').classList.toggle('-translate-x-full');
     });
     
+    // Helper function to format user name with role/type
+    function formatUserName(userName, userType, role) {
+        const roleLabels = {
+            'student': 'Student',
+            'faculty': 'Faculty',
+            'staff': 'Staff'
+        };
+        
+        const userTypeLabels = {
+            'admin': 'BAO Admin',
+            'secretary': 'BAO Secretary',
+            'staff': 'Staff',
+            'external': 'External User'
+        };
+        
+        // For students, use role if available
+        if (userType === 'student' && role && roleLabels[role]) {
+            return userName + ' (' + roleLabels[role] + ')';
+        }
+        
+        // For other user types, use user_type label
+        if (userTypeLabels[userType]) {
+            return userName + ' (' + userTypeLabels[userType] + ')';
+        }
+        
+        // Fallback
+        return userName;
+    }
+    
     // Status modal functions
     function openStatusModal(orderId, currentStatus) {
         document.getElementById('modal_order_id').value = orderId;
@@ -859,7 +919,7 @@ if (!empty($params)) {
     // Store order data - get all orders for modal display
     let ordersData = <?php 
         // Get all orders (not just paginated) for modal functionality
-        $modal_query = "SELECT o.*, u.name as user_name, u.email as user_email, i.name as item_name, i.price as item_price 
+        $modal_query = "SELECT o.*, u.name as user_name, u.email as user_email, u.user_type, u.role, i.name as item_name, i.price as item_price 
                        FROM orders o 
                        JOIN user_accounts u ON o.user_id = u.id 
                        JOIN inventory i ON o.inventory_id = i.id";
@@ -911,7 +971,7 @@ if (!empty($params)) {
                 <div class="grid grid-cols-2 gap-4">
                     <div>
                         <p class="text-sm text-gray-600">Customer:</p>
-                        <p class="font-medium">${firstOrder.user_name}</p>
+                        <p class="font-medium">${formatUserName(firstOrder.user_name, firstOrder.user_type || 'student', firstOrder.role || null)}</p>
                     </div>
                     <div>
                         <p class="text-sm text-gray-600">Email:</p>
@@ -969,7 +1029,7 @@ if (!empty($params)) {
                 <div class="grid grid-cols-2 gap-4">
                     <div>
                         <p class="text-sm text-gray-600">Customer:</p>
-                        <p class="font-medium">${order.user_name}</p>
+                        <p class="font-medium">${formatUserName(order.user_name, order.user_type || 'student', order.role || null)}</p>
                     </div>
                     <div>
                         <p class="text-sm text-gray-600">Email:</p>
@@ -1068,6 +1128,25 @@ if (!empty($params)) {
         document.getElementById('or_number').required = true;
         document.getElementById('or_number').focus();
     }
+    
+    // Prevent symbols in search field
+    document.addEventListener('DOMContentLoaded', function() {
+        const searchInput = document.getElementById('search');
+        if (searchInput) {
+            // Remove symbols on input
+            searchInput.addEventListener('input', function() {
+                this.value = this.value.replace(/[!@#$%^&*()_+={}\[\]:;"'<>?\/\\|`~]/g, '');
+            });
+            
+            // Prevent symbols on paste
+            searchInput.addEventListener('paste', function(e) {
+                e.preventDefault();
+                const pastedText = (e.clipboardData || window.clipboardData).getData('text');
+                const cleanedText = pastedText.replace(/[!@#$%^&*()_+={}\[\]:;"'<>?\/\\|`~]/g, '');
+                this.value = cleanedText;
+            });
+        }
+    });
 </script>
 
     <script src="<?php echo $base_url ?? ''; ?>/assets/js/main.js"></script>

@@ -41,6 +41,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $contact_number = sanitize_input($_POST['contact_number']);
             $equipment = isset($_POST['equipment']) ? sanitize_input($_POST['equipment']) : '';
             $chair_pairs = isset($_POST['chair_pairs']) ? intval($_POST['chair_pairs']) : 0;
+            // Limit chairs to maximum 999
+            if ($chair_pairs > 999) {
+                $chair_pairs = 999;
+                $error_message = "Number of chairs has been limited to 999 (maximum allowed).";
+            }
             $other_event_type = isset($_POST['other_event_type']) && !empty($_POST['other_event_type']) ? sanitize_input($_POST['other_event_type']) : null;
             
             // Handle letter upload
@@ -150,8 +155,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 					$duration = $start_datetime->diff($end_datetime);
 					$hours = $duration->h + ($duration->i / 60); // Convert minutes to decimal
 					
-					// Base gymnasium cost: 700 per hour
-					$gym_cost = $hours * 700;
+					// Get pricing settings from database
+					$pricing_query = "SELECT setting_key, setting_value FROM gym_pricing_settings";
+					$pricing_result = $conn->query($pricing_query);
+					$pricing_settings = [];
+					if ($pricing_result) {
+						while ($row = $pricing_result->fetch_assoc()) {
+							$pricing_settings[$row['setting_key']] = (float)$row['setting_value'];
+						}
+					}
+					// Set defaults if not found
+					if (empty($pricing_settings)) {
+						$pricing_settings = [
+							'gymnasium_per_hour' => 700.00,
+							'sound_system_per_hour' => 150.00,
+							'electricity_per_hour' => 150.00,
+							'chair_free_limit' => 200.00,
+							'chair_cost_per_unit' => 8.00
+						];
+					}
+					
+					// Base gymnasium cost from database
+					$gym_cost = $hours * $pricing_settings['gymnasium_per_hour'];
 					
 					// Equipment costs
 					$sound_system_cost = 0;
@@ -159,18 +184,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 					$chairs_cost = 0;
 					
 					if (strpos($equipment, 'Sound System') !== false) {
-						$sound_system_cost = $hours * 150; // Per hour
+						$sound_system_cost = $hours * $pricing_settings['sound_system_per_hour'];
 					}
 					if (strpos($equipment, 'Electricity') !== false) {
-						$electricity_cost = $hours * 150; // Per hour
+						$electricity_cost = $hours * $pricing_settings['electricity_per_hour'];
 					}
-					// Chairs are always available - calculate cost based on quantity
-					// First 200 chairs are free, then ₱8 per additional chair
+					// Chairs are always available - calculate cost based on quantity using database pricing
 					$chair_count = max(0, $chair_pairs);
-					if ($chair_count > 200) {
-						$chairs_cost = ($chair_count - 200) * 8; // ₱8 per chair beyond 200
+					$chair_free_limit = $pricing_settings['chair_free_limit'];
+					$chair_cost_per_unit = $pricing_settings['chair_cost_per_unit'];
+					if ($chair_count > $chair_free_limit) {
+						$chairs_cost = ($chair_count - $chair_free_limit) * $chair_cost_per_unit;
 					} else {
-						$chairs_cost = 0; // First 200 chairs are free
+						$chairs_cost = 0; // Within free limit
 					}
 					$number_of_pairs = 0; // Not used anymore, but keep for compatibility
 					
@@ -324,8 +350,8 @@ $count_result = $count_stmt->get_result();
 $total_rows = $count_result->fetch_assoc()['total'];
 $total_pages = $total_rows > 0 ? ceil($total_rows / $per_page) : 1;
 
-// Get paginated bookings
-$bookings_query = "SELECT * FROM bookings WHERE user_id = ? AND facility_type = 'gym' ORDER BY created_at DESC, date DESC LIMIT ?, ?";
+// Get paginated bookings (explicitly select status to ensure it's included)
+$bookings_query = "SELECT booking_id, user_id, facility_type, date, start_time, end_time, purpose, attendees, status, additional_info, created_at FROM bookings WHERE user_id = ? AND facility_type = 'gym' ORDER BY created_at DESC, date DESC LIMIT ?, ?";
 $bookings_stmt = $conn->prepare($bookings_query);
 $bookings_stmt->bind_param("iii", $user_id, $offset, $per_page);
 $bookings_stmt->execute();
@@ -461,11 +487,32 @@ if (empty($event_types)) {
                             
                             <div class="mt-6 pt-4 border-t border-gray-200">
                                 <h4 class="font-semibold text-gray-800 mb-3">Pricing Information</h4>
+                                <?php
+                                // Get pricing settings from database
+                                $pricing_query = "SELECT setting_key, setting_value FROM gym_pricing_settings";
+                                $pricing_result = $conn->query($pricing_query);
+                                $pricing_display = [];
+                                if ($pricing_result) {
+                                    while ($row = $pricing_result->fetch_assoc()) {
+                                        $pricing_display[$row['setting_key']] = (float)$row['setting_value'];
+                                    }
+                                }
+                                // Set defaults if not found
+                                if (empty($pricing_display)) {
+                                    $pricing_display = [
+                                        'gymnasium_per_hour' => 700.00,
+                                        'sound_system_per_hour' => 150.00,
+                                        'electricity_per_hour' => 150.00,
+                                        'chair_free_limit' => 200.00,
+                                        'chair_cost_per_unit' => 8.00
+                                    ];
+                                }
+                                ?>
                                 <ul class="list-disc pl-5 space-y-2 text-sm text-gray-700">
-                                    <li><strong>Gymnasium:</strong> ₱700 per hour</li>
-                                    <li><strong>Sound System:</strong> ₱150 per hour</li>
-                                    <li><strong>Electricity:</strong> ₱150 per hour</li>
-                                    <li><strong>Chairs:</strong> First 200 chairs are free, then ₱8 per additional chair</li>
+                                    <li><strong>Gymnasium:</strong> ₱<?php echo number_format($pricing_display['gymnasium_per_hour'], 2); ?> per hour</li>
+                                    <li><strong>Sound System:</strong> ₱<?php echo number_format($pricing_display['sound_system_per_hour'], 2); ?> per hour</li>
+                                    <li><strong>Electricity:</strong> ₱<?php echo number_format($pricing_display['electricity_per_hour'], 2); ?> per hour</li>
+                                    <li><strong>Chairs:</strong> First <?php echo (int)$pricing_display['chair_free_limit']; ?> chairs are free, then ₱<?php echo number_format($pricing_display['chair_cost_per_unit'], 2); ?> per additional chair</li>
                                 </ul>
                             </div>
                         </div>
@@ -495,21 +542,39 @@ if (empty($event_types)) {
                                     <?php while ($booking = $bookings_result->fetch_assoc()): ?>
                                         <?php 
                                         $additional_info = json_decode($booking['additional_info'], true);
-                                        $status_class = '';
-                                        $status_text = ucfirst($booking['status']);
+                                        $status_class = 'bg-gray-100 text-gray-800';
+                                        $status_text = 'Unknown';
                                         
-                                        switch ($booking['status']) {
+                                        // Get the status value, handle null/empty cases
+                                        $booking_status = isset($booking['status']) ? trim(strtolower($booking['status'])) : '';
+                                        
+                                        // Ensure status is always set with proper display text
+                                        switch ($booking_status) {
                                             case 'pending':
                                                 $status_class = 'bg-yellow-100 text-yellow-800';
+                                                $status_text = 'Pending';
                                                 break;
                                             case 'confirmed':
                                                 $status_class = 'bg-green-100 text-green-800';
+                                                $status_text = 'Approved';
                                                 break;
                                             case 'rejected':
                                                 $status_class = 'bg-red-100 text-red-800';
+                                                $status_text = 'Rejected';
                                                 break;
                                             case 'cancelled':
+                                            case 'canceled':
                                                 $status_class = 'bg-gray-100 text-gray-800';
+                                                $status_text = 'Cancelled';
+                                                break;
+                                            default:
+                                                // For any other status, use default styling
+                                                $status_class = 'bg-gray-100 text-gray-800';
+                                                if (!empty($booking['status'])) {
+                                                    $status_text = ucfirst(trim($booking['status']));
+                                                } else {
+                                                    $status_text = 'Unknown';
+                                                }
                                                 break;
                                         }
                                         
@@ -537,8 +602,18 @@ if (empty($event_types)) {
                                                 <?php endif; ?>
                                             </td>
                                             <td class="px-6 py-4 whitespace-nowrap">
-                                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo $status_class; ?>">
-                                                    <?php echo $status_text; ?>
+                                                <?php 
+                                                // Debug: Ensure we always have a status to display
+                                                $display_status = $status_text;
+                                                if (empty($display_status) && isset($booking['status'])) {
+                                                    $display_status = ucfirst(trim($booking['status']));
+                                                }
+                                                if (empty($display_status)) {
+                                                    $display_status = 'Unknown';
+                                                }
+                                                ?>
+                                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo htmlspecialchars($status_class); ?>">
+                                                    <?php echo htmlspecialchars($display_status); ?>
                                                 </span>
                                             </td>
                                             <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
@@ -778,8 +853,19 @@ if (empty($event_types)) {
             </div>
             <div class="mb-4" id="chairPairsField">
                 <label for="chair_pairs" class="block text-sm font-medium text-gray-700 mb-1">Number of Chairs</label>
-                <input type="number" id="chair_pairs" name="chair_pairs" min="0" value="0" class="w-full rounded-md border-gray-300 shadow-sm focus:border-amber-500 focus:ring focus:ring-amber-500 focus:ring-opacity-50">
-                <p class="mt-1 text-xs text-gray-500">First 200 chairs are free. Additional chairs beyond 200 are ₱8 each.</p>
+                <input type="number" id="chair_pairs" name="chair_pairs" min="0" max="999" step="1" value="0" class="w-full rounded-md border-gray-300 shadow-sm focus:border-amber-500 focus:ring focus:ring-amber-500 focus:ring-opacity-50" oninput="if(this.value > 999) this.value = 999;">
+                <?php
+                // Get pricing for chairs display
+                $chair_pricing_query = "SELECT setting_key, setting_value FROM gym_pricing_settings WHERE setting_key IN ('chair_free_limit', 'chair_cost_per_unit')";
+                $chair_pricing_result = $conn->query($chair_pricing_query);
+                $chair_pricing = ['chair_free_limit' => 200, 'chair_cost_per_unit' => 8];
+                if ($chair_pricing_result) {
+                    while ($row = $chair_pricing_result->fetch_assoc()) {
+                        $chair_pricing[$row['setting_key']] = (float)$row['setting_value'];
+                    }
+                }
+                ?>
+                <p class="mt-1 text-xs text-gray-500">First <?php echo (int)$chair_pricing['chair_free_limit']; ?> chairs are free. Additional chairs beyond <?php echo (int)$chair_pricing['chair_free_limit']; ?> are ₱<?php echo number_format($chair_pricing['chair_cost_per_unit'], 2); ?> each. Maximum: 999 chairs.</p>
             </div>
             <div class="mb-4">
                 <label for="attendees" class="block text-sm font-medium text-gray-700 mb-1">Expected Number of Attendees</label>
@@ -1040,6 +1126,10 @@ if (empty($event_types)) {
                 <h4 class="text-sm font-medium text-gray-500">Rejection Reason</h4>
                 <p id="detail-rejection-reason" class="mt-1 text-sm text-gray-900"></p>
             </div>
+            <div id="detail-total-amount-container">
+                <h4 class="text-sm font-medium text-gray-500">Total Amount</h4>
+                <p id="detail-total-amount" class="mt-1 text-sm font-bold text-green-600"></p>
+            </div>
         </div>
         </div>
         <div class="mt-6 flex justify-end p-6 pt-4 border-t border-gray-200 flex-shrink-0">
@@ -1163,6 +1253,15 @@ if (empty($event_types)) {
         if (!allowedTypes.includes(file.type)) {
             alert('Only JPG, PNG, GIF images and PDF files are allowed for the letter.');
             letterInput.focus();
+            return false;
+        }
+        
+        // Validate number of chairs (max 999)
+        const chairPairsInput = document.getElementById('chair_pairs');
+        if (chairPairsInput && parseInt(chairPairsInput.value) > 999) {
+            alert('Number of chairs cannot exceed 999. Please enter a valid number.');
+            chairPairsInput.focus();
+            chairPairsInput.value = 999;
             return false;
         }
         
@@ -1298,6 +1397,24 @@ if (empty($event_types)) {
         // Chairs are always available, so keep the field visible
         document.getElementById('chairPairsField').style.display = 'block';
         document.getElementById('chair_pairs').value = 0;
+        
+        // Add validation for chair_pairs input
+        const chairPairsInput = document.getElementById('chair_pairs');
+        if (chairPairsInput) {
+            chairPairsInput.addEventListener('input', function() {
+                if (this.value > 999) {
+                    this.value = 999;
+                    alert('Maximum number of chairs is 999.');
+                }
+            });
+            
+            chairPairsInput.addEventListener('blur', function() {
+                if (this.value > 999) {
+                    this.value = 999;
+                    alert('Maximum number of chairs is 999.');
+                }
+            });
+        }
     }
     
     // Details modal functions
@@ -1356,24 +1473,32 @@ if (empty($event_types)) {
         
         // Set status with appropriate styling
         const statusElement = document.getElementById('detail-status');
-        statusElement.textContent = booking.status.charAt(0).toUpperCase() + booking.status.slice(1);
         
         // Reset classes
         statusElement.className = 'mt-1 text-sm px-2 inline-flex text-xs leading-5 font-semibold rounded-full';
         
-        // Add appropriate class based on status
+        // Add appropriate class and text based on status
         switch (booking.status) {
             case 'pending':
                 statusElement.classList.add('bg-yellow-100', 'text-yellow-800');
+                statusElement.textContent = 'Pending';
                 break;
             case 'confirmed':
                 statusElement.classList.add('bg-green-100', 'text-green-800');
+                statusElement.textContent = 'Approved';
                 break;
             case 'rejected':
                 statusElement.classList.add('bg-red-100', 'text-red-800');
+                statusElement.textContent = 'Rejected';
                 break;
             case 'cancelled':
                 statusElement.classList.add('bg-gray-100', 'text-gray-800');
+                statusElement.textContent = 'Cancelled';
+                break;
+            default:
+                // For any other status, use default styling
+                statusElement.classList.add('bg-gray-100', 'text-gray-800');
+                statusElement.textContent = booking.status.charAt(0).toUpperCase() + booking.status.slice(1);
                 break;
         }
         
@@ -1386,6 +1511,18 @@ if (empty($event_types)) {
             rejectionContainer.classList.remove('hidden');
         } else {
             rejectionContainer.classList.add('hidden');
+        }
+        
+        // Display total amount if available
+        const totalAmountContainer = document.getElementById('detail-total-amount-container');
+        const totalAmountElement = document.getElementById('detail-total-amount');
+        
+        if (additionalInfo.cost_breakdown && additionalInfo.cost_breakdown.total) {
+            const totalAmount = parseFloat(additionalInfo.cost_breakdown.total);
+            totalAmountElement.textContent = '₱' + totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            totalAmountContainer.style.display = 'block';
+        } else {
+            totalAmountContainer.style.display = 'none';
         }
         
         document.getElementById('detailsModal').classList.remove('hidden');
@@ -1461,6 +1598,24 @@ if (empty($event_types)) {
             document.getElementById('receiptModal').classList.remove('hidden');
         }, 500);
         <?php endif; ?>
+        
+        // Setup chair pairs validation
+        const chairPairsInput = document.getElementById('chair_pairs');
+        if (chairPairsInput) {
+            chairPairsInput.addEventListener('input', function() {
+                if (this.value > 999) {
+                    this.value = 999;
+                    alert('Maximum number of chairs is 999.');
+                }
+            });
+            
+            chairPairsInput.addEventListener('blur', function() {
+                if (this.value > 999) {
+                    this.value = 999;
+                    alert('Maximum number of chairs is 999.');
+                }
+            });
+        }
         // Initialize flatpickr calendar (do not disable entire dates)
         // Calculate minimum date (3 days from today)
         const today = new Date();

@@ -299,7 +299,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_profile'])) {
                                 
                                 <div>
                                     <label for="phone" class="block text-sm font-medium text-gray-700 mb-1">Phone Number</label>
-                                    <input type="text" id="phone" name="phone" value="<?php echo htmlspecialchars($user_data['phone'] ?? ''); ?>" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                    <input type="text" id="phone" name="phone" value="<?php echo htmlspecialchars($user_data['phone'] ?? ''); ?>" maxlength="11" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                    <p class="text-xs text-gray-500 mt-1">11 digits only</p>
                                 </div>
                                 
                                 <div>
@@ -326,19 +327,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_profile'])) {
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <div>
                                         <label for="current_password" class="block text-sm font-medium text-gray-700 mb-1">Current Password</label>
-                                        <input type="password" id="current_password" name="current_password" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                        <div class="relative">
+                                            <input type="password" id="current_password" name="current_password" class="w-full px-3 py-2 pr-10 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                            <button type="button" onclick="togglePassword('current_password', 'toggle_current_password')" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-500 hover:text-gray-700">
+                                                <i class="fas fa-eye" id="toggle_current_password"></i>
+                                            </button>
+                                        </div>
                                     </div>
                                     
                                     <div class="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
                                         <div>
                                             <label for="new_password" class="block text-sm font-medium text-gray-700 mb-1">New Password</label>
-                                            <input type="password" id="new_password" name="new_password" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                            <div class="relative">
+                                                <input type="password" id="new_password" name="new_password" class="w-full px-3 py-2 pr-10 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                                <button type="button" onclick="togglePassword('new_password', 'toggle_new_password')" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-500 hover:text-gray-700">
+                                                    <i class="fas fa-eye" id="toggle_new_password"></i>
+                                                </button>
+                                            </div>
                                             <p class="text-xs text-gray-500 mt-1">Minimum 8 characters</p>
                                         </div>
                                         
                                         <div>
                                             <label for="confirm_password" class="block text-sm font-medium text-gray-700 mb-1">Confirm New Password</label>
-                                            <input type="password" id="confirm_password" name="confirm_password" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                            <div class="relative">
+                                                <input type="password" id="confirm_password" name="confirm_password" class="w-full px-3 py-2 pr-10 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                                <button type="button" onclick="togglePassword('confirm_password', 'toggle_confirm_password')" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-500 hover:text-gray-700">
+                                                    <i class="fas fa-eye" id="toggle_confirm_password"></i>
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
@@ -429,26 +445,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_profile'])) {
             });
         }
 
-        // Phone Number validation - numbers only (no letters)
+        // Phone Number validation - numbers only (no letters), max 11 digits
         const phoneField = document.getElementById('phone');
         if (phoneField) {
             phoneField.addEventListener('input', function(e) {
-                // Remove any non-numeric characters
-                e.target.value = e.target.value.replace(/[^0-9]/g, '');
+                // Remove any non-numeric characters and limit to 11 digits
+                let value = e.target.value.replace(/[^0-9]/g, '');
+                if (value.length > 11) {
+                    value = value.substring(0, 11);
+                }
+                e.target.value = value;
             });
 
             // Handle paste for phone field
             phoneField.addEventListener('paste', function(e) {
                 e.preventDefault();
                 let pastedText = (e.clipboardData || window.clipboardData).getData('text');
-                // Remove non-numeric characters
+                // Remove non-numeric characters and limit to 11 digits
                 pastedText = pastedText.replace(/[^0-9]/g, '');
+                if (pastedText.length > 11) {
+                    pastedText = pastedText.substring(0, 11);
+                }
                 let start = e.target.selectionStart;
                 let end = e.target.selectionEnd;
                 let text = e.target.value;
-                e.target.value = text.substring(0, start) + pastedText + text.substring(end);
-                e.target.selectionStart = e.target.selectionEnd = start + pastedText.length;
+                let newValue = text.substring(0, start) + pastedText + text.substring(end);
+                // Ensure total length doesn't exceed 11
+                if (newValue.length > 11) {
+                    newValue = newValue.substring(0, 11);
+                }
+                e.target.value = newValue;
+                e.target.selectionStart = e.target.selectionEnd = Math.min(start + pastedText.length, 11);
             });
+        }
+
+        // Toggle password visibility
+        function togglePassword(inputId, iconId) {
+            const input = document.getElementById(inputId);
+            const icon = document.getElementById(iconId);
+            
+            if (input.type === 'password') {
+                input.type = 'text';
+                icon.classList.remove('fa-eye');
+                icon.classList.add('fa-eye-slash');
+            } else {
+                input.type = 'password';
+                icon.classList.remove('fa-eye-slash');
+                icon.classList.add('fa-eye');
+            }
         }
 
         // Address validation - block @, !, *, $ characters

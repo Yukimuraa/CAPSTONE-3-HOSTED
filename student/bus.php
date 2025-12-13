@@ -48,7 +48,7 @@ $profile_pic = $user_data['profile_pic'] ?? '';
 
 // Function to check bus availability
 function checkBusAvailability($conn, $date_covered, $no_of_vehicles) {
-    // Get total available buses
+    // Get total available buses (exclude maintenance and out_of_service)
     $total_buses_query = "SELECT COUNT(*) as total FROM buses WHERE status = 'available'";
     $total_buses_result = $conn->query($total_buses_query);
     $total_buses = $total_buses_result->fetch_assoc()['total'];
@@ -430,14 +430,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
             // Continue with other validations if no error yet
             if (empty($error)) {
-                // Check if all selected buses are available for the date range
-                $unavailable_buses = [];
+                // First, check if all selected buses have status = 'available' (not maintenance or out_of_service)
+                $invalid_status_buses = [];
                 foreach ($bus_no_array as $selected_bus) {
                     $selected_bus = sanitize_input($selected_bus);
                     if (!empty($selected_bus)) {
-                        $date_check = checkBusAvailabilityForRange($conn, $selected_bus, $start_date, $end_date);
-                if (!$date_check['available']) {
-                            $unavailable_buses[] = $selected_bus;
+                        $status_check = $conn->prepare("SELECT status FROM buses WHERE bus_number = ?");
+                        $status_check->bind_param("s", $selected_bus);
+                        $status_check->execute();
+                        $status_result = $status_check->get_result();
+                        if ($status_row = $status_result->fetch_assoc()) {
+                            if ($status_row['status'] !== 'available') {
+                                $invalid_status_buses[] = $selected_bus;
+                            }
+                        } else {
+                            $invalid_status_buses[] = $selected_bus; // Bus doesn't exist
+                        }
+                    }
+                }
+                
+                if (!empty($invalid_status_buses)) {
+                    $error = "Bus(es) " . implode(', ', $invalid_status_buses) . " are not available for booking (may be in maintenance or out of service). Please select different buses.";
+                } else {
+                    // Check if all selected buses are available for the date range
+                    $unavailable_buses = [];
+                    foreach ($bus_no_array as $selected_bus) {
+                        $selected_bus = sanitize_input($selected_bus);
+                        if (!empty($selected_bus)) {
+                            $date_check = checkBusAvailabilityForRange($conn, $selected_bus, $start_date, $end_date);
+                    if (!$date_check['available']) {
+                                $unavailable_buses[] = $selected_bus;
+                            }
                         }
                     }
                 }
@@ -640,8 +663,8 @@ $stats_stmt->execute();
 $stats_result = $stats_stmt->get_result();
 $stats = $stats_result->fetch_assoc();
 
-// Get all available buses
-$buses_query = "SELECT id, bus_number, vehicle_type, capacity, status FROM buses ORDER BY bus_number ASC";
+// Get only available buses (exclude maintenance and out_of_service)
+$buses_query = "SELECT id, bus_number, vehicle_type, capacity, status FROM buses WHERE status = 'available' ORDER BY bus_number ASC";
 $buses_result = $conn->query($buses_query);
 $available_buses = [];
 while ($bus = $buses_result->fetch_assoc()) {
@@ -1131,10 +1154,6 @@ while ($bus = $buses_result->fetch_assoc()) {
                             <!-- Suggestions will be populated here -->
                         </div>
                     </div>
-                    <p class="text-xs text-gray-500 mt-1">
-                        <i class="fas fa-database text-green-600 mr-1"></i>
-                        Distance calculated from CHMSU using local database (all Negros Occidental locations)
-                    </p>
                 </div>
                 
                 <div>
@@ -1165,7 +1184,7 @@ while ($bus = $buses_result->fetch_assoc()) {
                     <!-- Pricing Guide -->
                     <div class="mt-3">
                         <button type="button" onclick="togglePricingGuide()" class="flex items-center justify-between w-full text-left p-3 bg-gray-50 border border-gray-200 rounded-md hover:bg-gray-100 transition-colors">
-                            <span class="text-sm font-medium text-gray-700">
+                            <span class="text-sm font-medium text-blue-600">
                                 <i class="fas fa-info-circle text-blue-600 mr-2"></i>View Pricing Guide
                             </span>
                             <i class="fas fa-chevron-down text-gray-400" id="pricingGuideIcon"></i>
@@ -1472,6 +1491,32 @@ while ($bus = $buses_result->fetch_assoc()) {
     </div>
 </div>
 
+<!-- Submission Success Modal -->
+<div id="submissionSuccessModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden z-50">
+    <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-lg mx-4">
+        <div class="flex items-center justify-center mb-4">
+            <div class="flex-shrink-0 w-16 h-16 rounded-full bg-green-100 flex items-center justify-center">
+                <i class="fas fa-check-circle text-green-600 text-3xl"></i>
+            </div>
+        </div>
+        <div class="text-center mb-6">
+            <h3 class="text-xl font-bold text-gray-900 mb-4">Bus Reservation Submitted</h3>
+            <div class="bg-blue-50 border-l-4 border-blue-400 p-4 text-left">
+                <p class="text-gray-700 leading-relaxed">
+                    Your bus reservation request has been submitted.<br><br>
+                    Please wait for the BAO Admin to review your request.<br><br>
+                    Once approved, you may proceed to the BAO Office for further instructions and for claiming your billing statement after the trip.
+                </p>
+            </div>
+        </div>
+        <div class="flex justify-center">
+            <button type="button" onclick="closeSubmissionSuccessModal()" class="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                <i class="fas fa-check mr-2"></i> Understood
+            </button>
+        </div>
+    </div>
+</div>
+
 <!-- Cancel Request Confirmation Modal -->
 <div id="cancelModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden z-50">
     <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md">
@@ -1526,10 +1571,11 @@ while ($bus = $buses_result->fetch_assoc()) {
         </div>
         
         <div class="mb-6">
-            <div class="bg-green-50 border-l-4 border-green-500 p-4 rounded">
-                <p class="text-sm text-gray-700">
-                    <i class="fas fa-info-circle text-green-600 mr-2"></i>
-                    Once your bus request has been approved by the BAO Admin or Secretary, you may proceed to the BAO Office to claim your billing statement.
+            <div class="bg-blue-50 border-l-4 border-blue-400 p-4 rounded">
+                <p class="text-sm text-gray-700 leading-relaxed">
+                    Your bus reservation request has been submitted.<br><br>
+                    Please wait for the BAO Admin to review your request.<br><br>
+                    Once approved, you may proceed to the BAO Office for further instructions and for claiming your billing statement.
                 </p>
             </div>
         </div>
@@ -1691,12 +1737,10 @@ function closeCancelModal() {
 
 function closeSuccessModal() {
     document.getElementById('successModal').classList.add('hidden');
-    // Remove the submitted parameter from URL
-    if (window.location.search.includes('submitted=1')) {
-        const url = new URL(window.location);
-        url.searchParams.delete('submitted');
-        window.history.replaceState({}, '', url);
-    }
+}
+
+function closeSubmissionSuccessModal() {
+    document.getElementById('submissionSuccessModal').classList.add('hidden');
 }
 
 // CHMSU Talisay as the fixed origin point (LOCAL ONLY - NO APIs)

@@ -34,6 +34,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
            $description = sanitize_input($_POST['description']);
            $price = floatval($_POST['price']);
            $quantity = intval($_POST['quantity']);
+           
+           // Validate item name - letters and spaces only (no numbers, no symbols)
+           if (!preg_match('/^[A-Za-z\s]+$/', $name)) {
+               $error_message = "Item name must contain only letters and spaces (no numbers or symbols).";
+           } elseif ($quantity > 5000) {
+               $error_message = "Quantity cannot exceed 5000.";
+           } else {
            $in_stock = isset($_POST['in_stock']) ? 1 : 0;
            
            // Handle sizes for specific clothing items
@@ -59,12 +66,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                    foreach ($_POST['sizes'] as $size) {
                        $qty_key = 'size_qty_' . $size;
                        $qty = isset($_POST[$qty_key]) ? intval($_POST[$qty_key]) : 0;
+                       // Limit each size quantity to maximum 5000
+                       if ($qty > 5000) {
+                           $error_message = "Size quantity for {$size} cannot exceed 5000.";
+                           break;
+                       }
                        $size_quantities[$size] = $qty;
                    }
-                   $size_quantities_json = json_encode($size_quantities);
-                   
-                   // Calculate total quantity from size quantities
-                   $quantity = array_sum($size_quantities);
+                   if (!isset($error_message)) {
+                       $size_quantities_json = json_encode($size_quantities);
+                       
+                       // Calculate total quantity from size quantities
+                       $quantity = array_sum($size_quantities);
+                       // Check if total exceeds 5000
+                       if ($quantity > 5000) {
+                           $error_message = "Total quantity cannot exceed 5000.";
+                       }
+                   }
                } else {
                    // If no sizes selected, set to empty array
                    $sizes = json_encode([]);
@@ -77,6 +95,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                $size_quantities_json = json_encode([]);
            }
            
+           if (!isset($error_message)) {
            // Handle image upload
            $image_path = null;
            if (isset($_FILES['image']) && $_FILES['image']['error'] == 0) {
@@ -95,25 +114,136 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                }
            }
            
-           $stmt = $conn->prepare("INSERT INTO inventory (name, description, price, quantity, in_stock, image_path, sizes, size_quantities) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-           $stmt->bind_param("ssdissss", $name, $description, $price, $quantity, $in_stock, $image_path, $sizes, $size_quantities_json);
-           
-           if ($stmt->execute()) {
-               $success_message = "Item added successfully";
-               
-               // Check if quantity is below 20 and create notification
-               if ($quantity < 20) {
-                   require_once '../includes/notification_functions.php';
-                   create_notification_for_admins(
-                       "Low Stock Alert",
-                       "Item '{$name}' has low stock (Quantity: {$quantity}). Please restock soon.",
-                       "warning",
-                       "admin/inventory.php"
-                   );
-               }
-           } else {
-               $error_message = "Error adding item: " . $conn->error;
+           // Final safety check: ensure quantity never exceeds 5000
+           if ($quantity > 5000) {
+               $quantity = 5000;
+               $error_message = "Quantity has been limited to 5000 (maximum allowed).";
            }
+           
+           if (!isset($error_message)) {
+               // Check if product with same name already exists
+               $check_stmt = $conn->prepare("SELECT id, quantity, size_quantities, sizes FROM inventory WHERE name = ?");
+               $check_stmt->bind_param("s", $name);
+               $check_stmt->execute();
+               $check_result = $check_stmt->get_result();
+               
+               if ($check_result->num_rows > 0) {
+                   // Product exists - update quantity instead of inserting
+                   $existing_item = $check_result->fetch_assoc();
+                   $existing_id = $existing_item['id'];
+                   $existing_quantity = $existing_item['quantity'];
+                   $existing_size_quantities = $existing_item['size_quantities'];
+                   $existing_sizes = $existing_item['sizes'];
+                   
+                   // Handle size quantities merge if both have sizes
+                   $final_size_quantities = [];
+                   $final_quantity = $quantity;
+                   
+                   if (!empty($size_quantities_json) && $size_quantities_json !== '[]' && !empty($existing_size_quantities) && $existing_size_quantities !== '[]') {
+                       // Both have sizes - merge them
+                       $new_size_qty = json_decode($size_quantities_json, true);
+                       $existing_size_qty = json_decode($existing_size_quantities, true);
+                       
+                       if ($new_size_qty && $existing_size_qty) {
+                           // Merge size quantities
+                           foreach ($existing_size_qty as $size => $qty) {
+                               $final_size_quantities[$size] = $qty;
+                           }
+                           foreach ($new_size_qty as $size => $qty) {
+                               if (isset($final_size_quantities[$size])) {
+                                   $final_size_quantities[$size] += $qty;
+                                   // Ensure no size exceeds 5000
+                                   if ($final_size_quantities[$size] > 5000) {
+                                       $final_size_quantities[$size] = 5000;
+                                   }
+                               } else {
+                                   $final_size_quantities[$size] = $qty;
+                               }
+                           }
+                           $final_quantity = array_sum($final_size_quantities);
+                           $size_quantities_json = json_encode($final_size_quantities);
+                           
+                           // Ensure total doesn't exceed 5000
+                           if ($final_quantity > 5000) {
+                               $final_quantity = 5000;
+                               $error_message = "Total quantity has been limited to 5000 (maximum allowed).";
+                           }
+                       }
+                   } elseif (!empty($size_quantities_json) && $size_quantities_json !== '[]') {
+                       // Only new item has sizes - use new sizes
+                       $final_quantity = $quantity;
+                   } elseif (!empty($existing_size_quantities) && $existing_size_quantities !== '[]') {
+                       // Only existing item has sizes - keep existing sizes, add to total quantity
+                       $final_size_quantities = json_decode($existing_size_quantities, true);
+                       $final_quantity = $existing_quantity + $quantity;
+                       $size_quantities_json = $existing_size_quantities;
+                       
+                       // Ensure total doesn't exceed 5000
+                       if ($final_quantity > 5000) {
+                           $final_quantity = 5000;
+                           $error_message = "Total quantity has been limited to 5000 (maximum allowed).";
+                       }
+                   } else {
+                       // Neither has sizes - simple quantity addition
+                       $final_quantity = $existing_quantity + $quantity;
+                       
+                       // Ensure total doesn't exceed 5000
+                       if ($final_quantity > 5000) {
+                           $final_quantity = 5000;
+                           $error_message = "Total quantity has been limited to 5000 (maximum allowed).";
+                       }
+                   }
+                   
+                   // Use existing sizes if new item doesn't have sizes
+                   if (empty($sizes) || $sizes === '[]' || $sizes === null) {
+                       $sizes = $existing_sizes;
+                   }
+                   
+                   // Update existing product
+                   $update_stmt = $conn->prepare("UPDATE inventory SET quantity = ?, size_quantities = ?, sizes = ?, in_stock = ?, updated_at = NOW() WHERE id = ?");
+                   $update_stmt->bind_param("isssi", $final_quantity, $size_quantities_json, $sizes, $in_stock, $existing_id);
+                   
+                   if ($update_stmt->execute()) {
+                       $success_message = "Item quantity updated successfully. Existing quantity: {$existing_quantity}, Added: {$quantity}, New total: {$final_quantity}";
+                       
+                       // Check if quantity is below 20 and create notification
+                       if ($final_quantity < 20) {
+                           require_once '../includes/notification_functions.php';
+                           create_notification_for_admins(
+                               "Low Stock Alert",
+                               "Item '{$name}' has low stock (Quantity: {$final_quantity}). Please restock soon.",
+                               "warning",
+                               "admin/inventory.php"
+                           );
+                       }
+                   } else {
+                       $error_message = "Error updating item quantity: " . $conn->error;
+                   }
+               } else {
+                   // Product doesn't exist - insert as new record
+                   $stmt = $conn->prepare("INSERT INTO inventory (name, description, price, quantity, in_stock, image_path, sizes, size_quantities) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+                   $stmt->bind_param("ssdissss", $name, $description, $price, $quantity, $in_stock, $image_path, $sizes, $size_quantities_json);
+                   
+                   if ($stmt->execute()) {
+                       $success_message = "Item added successfully";
+                       
+                       // Check if quantity is below 20 and create notification
+                       if ($quantity < 20) {
+                           require_once '../includes/notification_functions.php';
+                           create_notification_for_admins(
+                               "Low Stock Alert",
+                               "Item '{$name}' has low stock (Quantity: {$quantity}). Please restock soon.",
+                               "warning",
+                               "admin/inventory.php"
+                           );
+                       }
+                   } else {
+                       $error_message = "Error adding item: " . $conn->error;
+                   }
+               }
+           }
+           } // End if (!isset($error_message))
+           } // End else - quantity validation
            } // End else - admin can add items
        }
        
@@ -124,6 +254,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
            $description = sanitize_input($_POST['description']);
            $price = floatval($_POST['price']);
            $quantity = intval($_POST['quantity']);
+           
+           // Validate item name - letters and spaces only (no numbers, no symbols)
+           if (!preg_match('/^[A-Za-z\s]+$/', $name)) {
+               $error_message = "Item name must contain only letters and spaces (no numbers or symbols).";
+           } elseif ($quantity > 5000) {
+               $error_message = "Quantity cannot exceed 5000.";
+           } else {
            $in_stock = isset($_POST['in_stock']) ? 1 : 0;
            
            // Handle sizes for specific clothing items
@@ -149,12 +286,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                    foreach ($_POST['sizes'] as $size) {
                        $qty_key = 'size_qty_' . $size;
                        $qty = isset($_POST[$qty_key]) ? intval($_POST[$qty_key]) : 0;
+                       // Limit each size quantity to maximum 5000
+                       if ($qty > 5000) {
+                           $error_message = "Size quantity for {$size} cannot exceed 5000.";
+                           break;
+                       }
                        $size_quantities[$size] = $qty;
                    }
-                   $size_quantities_json = json_encode($size_quantities);
-                   
-                   // Calculate total quantity from size quantities
-                   $quantity = array_sum($size_quantities);
+                   if (!isset($error_message)) {
+                       $size_quantities_json = json_encode($size_quantities);
+                       
+                       // Calculate total quantity from size quantities
+                       $quantity = array_sum($size_quantities);
+                       // Check if total exceeds 5000
+                       if ($quantity > 5000) {
+                           $error_message = "Total quantity cannot exceed 5000.";
+                       }
+                   }
                } else {
                    // If no sizes selected, set to empty array
                    $sizes = json_encode([]);
@@ -167,6 +315,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                $size_quantities_json = json_encode([]);
            }
            
+           if (!isset($error_message)) {
            // Get current item data to check previous quantity
            $stmt = $conn->prepare("SELECT image_path, quantity, name FROM inventory WHERE id = ?");
            $stmt->bind_param("i", $id);
@@ -206,6 +355,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                    unlink("../" . $current_image);
                }
                $image_path = null;
+           }
+           
+           // Final safety check: ensure quantity never exceeds 5000
+           if ($quantity > 5000) {
+               $quantity = 5000;
+               $error_message = "Quantity has been limited to 5000 (maximum allowed).";
            }
            
            $stmt = $conn->prepare("UPDATE inventory SET name = ?, description = ?, price = ?, quantity = ?, in_stock = ?, image_path = ?, sizes = ?, size_quantities = ? WHERE id = ?");
@@ -249,6 +404,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
            } else {
                $error_message = "Error updating item: " . $conn->error;
            }
+           } // End if (!isset($error_message))
+           } // End else - quantity validation
        }
        
         // Delete item
@@ -462,7 +619,13 @@ $total_items = $conn->query($total_items_query)->fetch_assoc();
            <input type="hidden" name="action" value="add">
            <div class="mb-4">
                <label for="name" class="block text-sm font-medium text-gray-700 mb-1">Item Name</label>
-               <input type="text" id="name" name="name" required class="w-full rounded-md border-gray-300 shadow-sm focus:border-emerald-500 focus:ring focus:ring-emerald-500 focus:ring-opacity-50">
+               <input type="text" id="name" name="name" required 
+                      pattern="[A-Za-z\s]+"
+                      title="Item name must contain only letters and spaces (no numbers or symbols)"
+                      onkeypress="return /[A-Za-z\s]/.test(event.key)"
+                      oninput="this.value = this.value.replace(/[^A-Za-z\s]/g, '')"
+                      class="w-full rounded-md border-gray-300 shadow-sm focus:border-emerald-500 focus:ring focus:ring-emerald-500 focus:ring-opacity-50">
+               <p class="mt-1 text-xs text-gray-500">Letters and spaces only</p>
            </div>
            <div class="mb-4">
                <label for="description" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
@@ -486,7 +649,7 @@ $total_items = $conn->query($total_items_query)->fetch_assoc();
                </div>
                <div id="quantity-container">
                    <label for="quantity" class="block text-sm font-medium text-gray-700 mb-1">Quantity <span id="quantity-note" class="text-xs text-gray-500 hidden">(Auto-calculated from sizes)</span></label>
-                   <input type="number" id="quantity" name="quantity" min="0" required class="w-full rounded-md border-gray-300 shadow-sm focus:border-emerald-500 focus:ring focus:ring-emerald-500 focus:ring-opacity-50">
+                   <input type="number" id="quantity" name="quantity" min="0" max="5000" step="1" required class="w-full rounded-md border-gray-300 shadow-sm focus:border-emerald-500 focus:ring focus:ring-emerald-500 focus:ring-opacity-50" oninput="if(this.value > 5000) this.value = 5000;">
                </div>
            </div>
            <div class="mb-4">
@@ -544,7 +707,13 @@ $total_items = $conn->query($total_items_query)->fetch_assoc();
            <input type="hidden" id="edit_id" name="id">
            <div class="mb-4">
                <label for="edit_name" class="block text-sm font-medium text-gray-700 mb-1">Item Name</label>
-               <input type="text" id="edit_name" name="name" required class="w-full rounded-md border-gray-300 shadow-sm focus:border-emerald-500 focus:ring focus:ring-emerald-500 focus:ring-opacity-50">
+               <input type="text" id="edit_name" name="name" required 
+                      pattern="[A-Za-z\s]+"
+                      title="Item name must contain only letters and spaces (no numbers or symbols)"
+                      onkeypress="return /[A-Za-z\s]/.test(event.key)"
+                      oninput="this.value = this.value.replace(/[^A-Za-z\s]/g, '')"
+                      class="w-full rounded-md border-gray-300 shadow-sm focus:border-emerald-500 focus:ring focus:ring-emerald-500 focus:ring-opacity-50">
+               <p class="mt-1 text-xs text-gray-500">Letters and spaces only</p>
            </div>
            <div class="mb-4">
                <label for="edit_description" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
@@ -568,7 +737,7 @@ $total_items = $conn->query($total_items_query)->fetch_assoc();
                </div>
                <div id="edit-quantity-container">
                    <label for="edit_quantity" class="block text-sm font-medium text-gray-700 mb-1">Quantity <span id="edit-quantity-note" class="text-xs text-gray-500 hidden">(Auto-calculated from sizes)</span></label>
-                   <input type="number" id="edit_quantity" name="quantity" min="0" required class="w-full rounded-md border-gray-300 shadow-sm focus:border-emerald-500 focus:ring focus:ring-emerald-500 focus:ring-opacity-50">
+                   <input type="number" id="edit_quantity" name="quantity" min="0" max="5000" step="1" required class="w-full rounded-md border-gray-300 shadow-sm focus:border-emerald-500 focus:ring focus:ring-emerald-500 focus:ring-opacity-50" oninput="if(this.value > 5000) this.value = 5000;">
                </div>
            </div>
            <div class="mb-4">
@@ -879,9 +1048,12 @@ $total_items = $conn->query($total_items_query)->fetch_assoc();
        qtyInput.name = 'size_qty_' + (size || '');
        qtyInput.className = 'w-full size-qty-input px-2 py-2 text-sm border border-gray-300 rounded-md focus:border-emerald-500 focus:ring focus:ring-emerald-500';
        qtyInput.min = 0;
+       qtyInput.max = 5000;
+       qtyInput.step = 1;
        qtyInput.value = qty;
        qtyInput.placeholder = '0';
        qtyInput.required = true;
+       qtyInput.setAttribute('oninput', 'if(this.value > 5000) this.value = 5000;');
        
        qtyContainer.appendChild(qtyLabel);
        qtyContainer.appendChild(qtyInput);
@@ -907,9 +1079,23 @@ $total_items = $conn->query($total_items_query)->fetch_assoc();
            updateTotalQuantity();
        });
        
-       // Update total when quantity changes
+       // Update total when quantity changes and enforce max limit
        qtyInput.addEventListener('input', function() {
+           // Enforce max limit of 5000
+           if (this.value > 5000) {
+               this.value = 5000;
+               alert('Maximum quantity per size is 5000.');
+           }
            updateTotalQuantity();
+       });
+       
+       // Also validate on blur
+       qtyInput.addEventListener('blur', function() {
+           if (this.value > 5000) {
+               this.value = 5000;
+               alert('Maximum quantity per size is 5000.');
+               updateTotalQuantity();
+           }
        });
        
        container.appendChild(sizeEntry);
@@ -972,6 +1158,116 @@ $total_items = $conn->query($total_items_query)->fetch_assoc();
    document.getElementById('edit-add-size-btn').addEventListener('click', function() {
        createSizeEntry('edit-size-entries-container', '', 0, true);
    });
+   
+   // Add validation for quantity input fields
+   const quantityInput = document.getElementById('quantity');
+   if (quantityInput) {
+       quantityInput.addEventListener('input', function() {
+           if (this.value > 5000) {
+               this.value = 5000;
+               alert('Maximum quantity is 5000.');
+           }
+       });
+       
+       quantityInput.addEventListener('blur', function() {
+           if (this.value > 5000) {
+               this.value = 5000;
+               alert('Maximum quantity is 5000.');
+           }
+       });
+   }
+   
+   const editQuantityInput = document.getElementById('edit_quantity');
+   if (editQuantityInput) {
+       editQuantityInput.addEventListener('input', function() {
+           if (this.value > 5000) {
+               this.value = 5000;
+               alert('Maximum quantity is 5000.');
+           }
+       });
+       
+       editQuantityInput.addEventListener('blur', function() {
+           if (this.value > 5000) {
+               this.value = 5000;
+               alert('Maximum quantity is 5000.');
+           }
+       });
+   }
+   
+   // Form submission validation
+   const addForm = document.querySelector('#addModal form');
+   if (addForm) {
+       addForm.addEventListener('submit', function(e) {
+           const quantity = document.getElementById('quantity');
+           if (quantity && !quantity.readOnly && parseInt(quantity.value) > 5000) {
+               e.preventDefault();
+               alert('Quantity cannot exceed 5000.');
+               quantity.focus();
+               return false;
+           }
+           
+           // Check size quantities
+           const sizeQtyInputs = document.querySelectorAll('.size-qty-input');
+           let hasError = false;
+           sizeQtyInputs.forEach(input => {
+               if (parseInt(input.value) > 5000) {
+                   hasError = true;
+                   input.value = 5000;
+               }
+           });
+           
+           if (hasError) {
+               e.preventDefault();
+               alert('Size quantities cannot exceed 5000. Values have been adjusted.');
+               return false;
+           }
+           
+           // Check total quantity
+           const totalQty = calculateTotalQuantity('size-entries-container');
+           if (totalQty > 5000) {
+               e.preventDefault();
+               alert('Total quantity cannot exceed 5000. Please adjust size quantities.');
+               return false;
+           }
+       });
+   }
+   
+   const editForm = document.querySelector('#editModal form');
+   if (editForm) {
+       editForm.addEventListener('submit', function(e) {
+           const quantity = document.getElementById('edit_quantity');
+           if (quantity && !quantity.readOnly && parseInt(quantity.value) > 5000) {
+               e.preventDefault();
+               alert('Quantity cannot exceed 5000.');
+               quantity.focus();
+               return false;
+           }
+           
+           // Check size quantities
+           const sizeQtyInputs = document.querySelectorAll('#edit-size-entries-container .size-qty-input');
+           let hasError = false;
+           sizeQtyInputs.forEach(input => {
+               if (parseInt(input.value) > 5000) {
+                   hasError = true;
+                   input.value = 5000;
+               }
+           });
+           
+           if (hasError) {
+               e.preventDefault();
+               alert('Size quantities cannot exceed 5000. Values have been adjusted.');
+               return false;
+           }
+           
+           // Check total quantity
+           const totalQty = calculateTotalQuantity('edit-size-entries-container');
+           if (totalQty > 5000) {
+               e.preventDefault();
+               alert('Total quantity cannot exceed 5000. Please adjust size quantities.');
+               return false;
+           }
+       });
+   }
    
    // For the add item form
    document.getElementById('name').addEventListener('input', function() {

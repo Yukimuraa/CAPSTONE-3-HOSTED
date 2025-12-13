@@ -533,7 +533,7 @@ $receipt_no = '';
                         </div>
                         <div class="form-field">
                             <span class="form-label">Date:</span>
-                            <span class="form-value"><?php echo $order_date_formatted; ?></span>
+                            <span class="form-value"><?php echo $order_date_formatted; ?> Time: <?php echo $order_time; ?></span>
                         </div>
                     </div>
                     <div class="form-middle">
@@ -587,7 +587,7 @@ $receipt_no = '';
                     </div>
                     <div class="receipt-field">
                         <span class="receipt-label">Date:</span>
-                        <span class="receipt-value"><?php echo $order_date_formatted; ?></span>
+                        <span class="receipt-value"><?php echo $order_date_formatted; ?> Time: <?php echo $order_time; ?></span>
                     </div>
                     <div class="receipt-field">
                         <span class="receipt-label">Amount:</span>
@@ -657,7 +657,7 @@ $receipt_no = '';
                         </div>
                         <div class="form-field">
                             <span class="form-label">Date:</span>
-                            <span class="form-value"><?php echo $order_date_formatted; ?></span>
+                            <span class="form-value"><?php echo $order_date_formatted; ?> Time: <?php echo $order_time; ?></span>
                         </div>
                     </div>
                     <div class="form-middle">
@@ -711,7 +711,7 @@ $receipt_no = '';
                     </div>
                     <div class="receipt-field">
                         <span class="receipt-label">Date:</span>
-                        <span class="receipt-value"><?php echo $order_date_formatted; ?></span>
+                        <span class="receipt-value"><?php echo $order_date_formatted; ?> Time: <?php echo $order_time; ?></span>
                     </div>
                     <div class="receipt-field">
                         <span class="receipt-label">Amount:</span>

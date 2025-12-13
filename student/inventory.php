@@ -42,6 +42,64 @@ $user_stmt->execute();
 $user_result = $user_stmt->get_result();
 $user_data = $user_result->fetch_assoc();
 $profile_pic = $user_data['profile_pic'] ?? '';
+
+// Get user role from session
+$user_role = $_SESSION['user_sessions']['student']['role'] ?? 'student';
+
+// If role is not in session, fetch it from database
+if (empty($user_role) || $user_role === null) {
+    $role_stmt = $conn->prepare("SELECT role FROM user_accounts WHERE id = ?");
+    $role_stmt->bind_param("i", $_SESSION['user_id']);
+    $role_stmt->execute();
+    $role_result = $role_stmt->get_result();
+    if ($role_result->num_rows > 0) {
+        $role_data = $role_result->fetch_assoc();
+        $user_role = $role_data['role'] ?? 'student';
+        // Update session with role
+        $_SESSION['user_sessions']['student']['role'] = $user_role;
+    } else {
+        $user_role = 'student'; // Default fallback
+    }
+}
+
+// Filter inventory items based on user role
+$filtered_items = [];
+while ($item = $result->fetch_assoc()) {
+    $item_name_lower = strtolower($item['name']);
+    
+    // Check if item is a faculty ID card/cord
+    $is_faculty_id_card = (strpos($item_name_lower, 'faculty') !== false && 
+                          (strpos($item_name_lower, 'id') !== false || 
+                           strpos($item_name_lower, 'cord') !== false ||
+                           strpos($item_name_lower, 'card') !== false));
+    
+    // Check if item is a staff ID card/cord
+    $is_staff_id_card = (strpos($item_name_lower, 'staff') !== false && 
+                        (strpos($item_name_lower, 'id') !== false || 
+                         strpos($item_name_lower, 'cord') !== false ||
+                         strpos($item_name_lower, 'card') !== false));
+    
+    // Apply filtering based on user role
+    if ($user_role === 'student') {
+        // Students: Hide faculty ID cards/cords and staff ID cards/cords, show everything else
+        if ($is_faculty_id_card || $is_staff_id_card) {
+            continue; // Skip this item
+        }
+    } elseif ($user_role === 'faculty') {
+        // Faculty: Only show faculty ID cards/cords, hide everything else
+        if (!$is_faculty_id_card) {
+            continue; // Skip all items that are not faculty ID cards/cords
+        }
+    } elseif ($user_role === 'staff') {
+        // Staff: Only show staff ID cards/cords, hide everything else
+        if (!$is_staff_id_card) {
+            continue; // Skip all items that are not staff ID cards/cords
+        }
+    }
+    
+    // If item passed the filter, add it to filtered_items
+    $filtered_items[] = $item;
+}
 ?>
 
 <?php include '../includes/header.php'; ?>
@@ -113,8 +171,8 @@ $profile_pic = $user_data['profile_pic'] ?? '';
                 
                 <!-- Items grid -->
                 <div class="grid gap-6 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-                    <?php if ($result->num_rows > 0): ?>
-                        <?php while ($item = $result->fetch_assoc()): ?>
+                    <?php if (count($filtered_items) > 0): ?>
+                        <?php foreach ($filtered_items as $item): ?>
                             <div class="bg-white rounded-lg shadow overflow-hidden <?php echo $item['in_stock'] ? '' : 'opacity-70'; ?>">
                                 <div class="p-4">
                                     <div class="h-48 w-full bg-gray-100 rounded-md flex items-center justify-center mb-4 overflow-hidden">
@@ -175,7 +233,7 @@ $profile_pic = $user_data['profile_pic'] ?? '';
                                     </button>
                                 </div>
                             </div>
-                        <?php endwhile; ?>
+                        <?php endforeach; ?>
                     <?php else: ?>
                         <div class="col-span-3 text-center py-8 bg-white rounded-lg shadow">
                             <i class="fas fa-box-open text-gray-400 text-4xl mb-2"></i>
@@ -304,66 +362,120 @@ $profile_pic = $user_data['profile_pic'] ?? '';
             fetch('get_cart_stock.php?item_id=' + item.id)
                 .then(response => response.json())
                 .then(cartStock => {
-                    // Add sizes with available stock (total minus cart/pending)
+                    // Get all sizes from both sizes array and size_quantities object
+                    let allSizes = [];
+                    
+                    // First, get sizes from sizes array if it exists
                     if (item.sizes) {
                         try {
-                            const sizes = JSON.parse(item.sizes);
-                            
-                            // Show all sizes with available stock
-                            sizes.forEach(size => {
-                                const totalStock = sizeQuantities[size] || 0;
-                                const inCart = (cartStock[size] || 0);
-                                const availableStock = totalStock - inCart;
-                                
-                                const option = document.createElement('option');
-                                option.value = size;
-                                // Display available stock (updates after adding to cart)
-                                option.textContent = size + ' (Stock: ' + availableStock + ')';
-                                // Store both for validation
-                                option.dataset.totalStock = totalStock;
-                                option.dataset.availableStock = availableStock;
-                                option.dataset.itemId = item.id;
-                                
-                                // Disable if no stock available
-                                if (availableStock <= 0) {
-                                    option.disabled = true;
-                                    option.style.color = '#9CA3AF';
-                                }
-                                
-                                sizeSelect.appendChild(option);
-                            });
+                            const sizesArray = JSON.parse(item.sizes);
+                            if (Array.isArray(sizesArray)) {
+                                allSizes = [...sizesArray];
+                            }
                         } catch (e) {
                             console.error('Error parsing sizes:', e);
                         }
                     }
+                    
+                    // Then, add any sizes from size_quantities that aren't already in the list
+                    if (sizeQuantities && typeof sizeQuantities === 'object') {
+                        Object.keys(sizeQuantities).forEach(size => {
+                            if (!allSizes.includes(size)) {
+                                allSizes.push(size);
+                            }
+                        });
+                    }
+                    
+                    // Sort sizes in a logical order
+                    const sizeOrder = ['XS', 'S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
+                    allSizes.sort((a, b) => {
+                        const indexA = sizeOrder.indexOf(a);
+                        const indexB = sizeOrder.indexOf(b);
+                        if (indexA !== -1 && indexB !== -1) return indexA - indexB;
+                        if (indexA !== -1) return -1;
+                        if (indexB !== -1) return 1;
+                        return a.localeCompare(b);
+                    });
+                    
+                    // Show all sizes with available stock
+                    allSizes.forEach(size => {
+                        const totalStock = sizeQuantities[size] || 0;
+                        const inCart = (cartStock[size] || 0);
+                        const availableStock = totalStock - inCart;
+                        
+                        const option = document.createElement('option');
+                        option.value = size;
+                        // Display available stock (updates after adding to cart)
+                        option.textContent = size + ' (Stock: ' + availableStock + ')';
+                        // Store both for validation
+                        option.dataset.totalStock = totalStock;
+                        option.dataset.availableStock = availableStock;
+                        option.dataset.itemId = item.id;
+                        
+                        // Disable if no stock available
+                        if (availableStock <= 0) {
+                            option.disabled = true;
+                            option.style.color = '#9CA3AF';
+                        }
+                        
+                        sizeSelect.appendChild(option);
+                    });
                 })
                 .catch(error => {
                     console.error('Error fetching cart stock:', error);
                     // Fallback: show sizes with total stock if fetch fails
+                    // Get all sizes from both sizes array and size_quantities object
+                    let allSizes = [];
+                    
+                    // First, get sizes from sizes array if it exists
                     if (item.sizes) {
                         try {
-                            const sizes = JSON.parse(item.sizes);
-                            sizes.forEach(size => {
-                                const totalStock = sizeQuantities[size] || 0;
-                                
-                                const option = document.createElement('option');
-                                option.value = size;
-                                option.textContent = size + ' (Stock: ' + totalStock + ')';
-                                option.dataset.totalStock = totalStock;
-                                option.dataset.availableStock = totalStock;
-                                option.dataset.itemId = item.id;
-                                
-                                if (totalStock <= 0) {
-                                    option.disabled = true;
-                                    option.style.color = '#9CA3AF';
-                                }
-                                
-                                sizeSelect.appendChild(option);
-                            });
+                            const sizesArray = JSON.parse(item.sizes);
+                            if (Array.isArray(sizesArray)) {
+                                allSizes = [...sizesArray];
+                            }
                         } catch (e) {
                             console.error('Error parsing sizes:', e);
                         }
                     }
+                    
+                    // Then, add any sizes from size_quantities that aren't already in the list
+                    if (sizeQuantities && typeof sizeQuantities === 'object') {
+                        Object.keys(sizeQuantities).forEach(size => {
+                            if (!allSizes.includes(size)) {
+                                allSizes.push(size);
+                            }
+                        });
+                    }
+                    
+                    // Sort sizes in a logical order
+                    const sizeOrder = ['XS', 'S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
+                    allSizes.sort((a, b) => {
+                        const indexA = sizeOrder.indexOf(a);
+                        const indexB = sizeOrder.indexOf(b);
+                        if (indexA !== -1 && indexB !== -1) return indexA - indexB;
+                        if (indexA !== -1) return -1;
+                        if (indexB !== -1) return 1;
+                        return a.localeCompare(b);
+                    });
+                    
+                    allSizes.forEach(size => {
+                        const totalStock = sizeQuantities[size] || 0;
+                        
+                        const option = document.createElement('option');
+                        option.value = size;
+                        option.textContent = size + ' (Stock: ' + totalStock + ')';
+                        option.dataset.totalStock = totalStock;
+                        option.dataset.availableStock = totalStock;
+                        option.dataset.itemId = item.id;
+                        
+                        if (totalStock <= 0) {
+                            option.disabled = true;
+                            option.style.color = '#9CA3AF';
+                        }
+                        
+                        sizeSelect.appendChild(option);
+                    });
                 });
             
             // Update quantity max when size is selected - use pre-calculated available stock

@@ -8,6 +8,7 @@ require_admin();
 
 // Get report parameters
 $report_type = isset($_GET['report_type']) ? sanitize_input($_GET['report_type']) : '';
+$user_type_filter = isset($_GET['user_type']) ? sanitize_input($_GET['user_type']) : '';
 
 // Set page title based on report type
 $page_title = "Gym Reports - CHMSU BAO";
@@ -33,45 +34,126 @@ if ($report_type === 'usage') {
     $start_date = isset($_GET['start_date']) ? sanitize_input($_GET['start_date']) : date('Y-m-d', strtotime('-30 days'));
     $end_date = isset($_GET['end_date']) ? sanitize_input($_GET['end_date']) : date('Y-m-d');
     
-    // Get usage data - bookings table doesn't have facility_id, so we just group by date
-    $query = "SELECT b.date as booking_date, 'Gymnasium' as facility_name, COUNT(*) as booking_count 
+    // Get usage data with user type breakdown
+    $query = "SELECT b.date as booking_date, 'Gymnasium' as facility_name, 
+                     COUNT(*) as booking_count,
+                     COUNT(CASE WHEN u.user_type IN ('student', 'faculty', 'staff') THEN 1 END) as internal_count,
+                     COUNT(CASE WHEN u.user_type = 'external' THEN 1 END) as external_count,
+                     SUM(COALESCE(b.attendees, 0)) as total_attendees
               FROM bookings b 
-              WHERE b.facility_type = 'gym' AND b.date BETWEEN ? AND ? 
-              GROUP BY b.date 
-              ORDER BY b.date ASC";
+              LEFT JOIN user_accounts u ON b.user_id = u.id
+              WHERE b.facility_type = 'gym' AND b.date BETWEEN ? AND ?";
+    
+    $params = [$start_date, $end_date];
+    $types = "ss";
+    
+    if ($user_type_filter === 'internal') {
+        $query .= " AND u.user_type IN ('student', 'faculty', 'staff')";
+    } elseif ($user_type_filter === 'external') {
+        $query .= " AND u.user_type = 'external'";
+    }
+    
+    $query .= " GROUP BY b.date ORDER BY COUNT(CASE WHEN u.user_type = 'external' THEN 1 END) DESC, b.date DESC";
     
     $stmt = $conn->prepare($query);
-    $stmt->bind_param("ss", $start_date, $end_date);
+    $stmt->bind_param($types, ...$params);
     $stmt->execute();
     $result = $stmt->get_result();
     
+    // Calculate collected amounts for external users
+    $collected_query = "SELECT b.date, b.additional_info
+                        FROM bookings b 
+                        LEFT JOIN user_accounts u ON b.user_id = u.id
+                        WHERE b.facility_type = 'gym' 
+                        AND b.date BETWEEN ? AND ?
+                        AND u.user_type = 'external'
+                        AND (b.status = 'confirmed' OR b.status = 'approved')
+                        AND b.or_number IS NOT NULL 
+                        AND b.or_number != ''
+                        AND b.additional_info IS NOT NULL";
+    
+    $collected_params = [$start_date, $end_date];
+    $collected_types = "ss";
+    
+    if ($user_type_filter === 'external') {
+        // Already filtered by external
+    } elseif ($user_type_filter === 'internal') {
+        // No collected for internal
+        $collected_query = "SELECT b.date, b.additional_info FROM bookings b WHERE 1=0";
+    }
+    
+    $collected_stmt = $conn->prepare($collected_query);
+    if ($user_type_filter !== 'internal') {
+        $collected_stmt->bind_param($collected_types, ...$collected_params);
+        $collected_stmt->execute();
+        $collected_result = $collected_stmt->get_result();
+        
+        $collected_by_date = [];
+        $total_collected = 0;
+        while ($collected_row = $collected_result->fetch_assoc()) {
+            $additional_info = json_decode($collected_row['additional_info'] ?? '{}', true) ?: [];
+            $cost_breakdown = $additional_info['cost_breakdown'] ?? [];
+            $total = isset($cost_breakdown['total']) ? (float)$cost_breakdown['total'] : 0;
+            
+            $date_key = $collected_row['date'];
+            if (!isset($collected_by_date[$date_key])) {
+                $collected_by_date[$date_key] = 0;
+            }
+            $collected_by_date[$date_key] += $total;
+            $total_collected += $total;
+        }
+    } else {
+        $collected_by_date = [];
+        $total_collected = 0;
+    }
+    
     while ($row = $result->fetch_assoc()) {
+        $row['internal_count'] = (int)$row['internal_count'];
+        $row['external_count'] = (int)$row['external_count'];
+        $row['total_attendees'] = (int)($row['total_attendees'] ?? 0);
+        $row['collected'] = isset($collected_by_date[$row['booking_date']]) ? $collected_by_date[$row['booking_date']] : 0;
         $report_data[] = $row;
     }
     
-    // Prepare chart data - show total bookings per date
-    $chart_query = "SELECT b.date, COUNT(*) as booking_count 
+    // Prepare chart data - show total bookings per date with internal/external breakdown
+    $chart_query = "SELECT b.date, 
+                           COUNT(*) as booking_count,
+                           COUNT(CASE WHEN u.user_type IN ('student', 'faculty', 'staff') THEN 1 END) as internal_count,
+                           COUNT(CASE WHEN u.user_type = 'external' THEN 1 END) as external_count
                    FROM bookings b 
-                   WHERE b.facility_type = 'gym' AND b.date BETWEEN ? AND ? 
-                   GROUP BY b.date 
-                   ORDER BY b.date ASC";
+                   LEFT JOIN user_accounts u ON b.user_id = u.id
+                   WHERE b.facility_type = 'gym' AND b.date BETWEEN ? AND ?";
+    
+    $chart_params = [$start_date, $end_date];
+    $chart_types = "ss";
+    
+    if ($user_type_filter === 'internal') {
+        $chart_query .= " AND u.user_type IN ('student', 'faculty', 'staff')";
+    } elseif ($user_type_filter === 'external') {
+        $chart_query .= " AND u.user_type = 'external'";
+    }
+    
+    $chart_query .= " GROUP BY b.date ORDER BY b.date ASC";
     
     $chart_stmt = $conn->prepare($chart_query);
-    $chart_stmt->bind_param("ss", $start_date, $end_date);
+    $chart_stmt->bind_param($chart_types, ...$chart_params);
     $chart_stmt->execute();
     $chart_result = $chart_stmt->get_result();
     
     $labels = [];
-    $data = [];
+    $internal_data = [];
+    $external_data = [];
     
     while ($row = $chart_result->fetch_assoc()) {
         $labels[] = date('M j', strtotime($row['date']));
-        $data[] = $row['booking_count'];
+        $internal_data[] = (int)$row['internal_count'];
+        $external_data[] = (int)$row['external_count'];
     }
     
     $chart_data = [
         'labels' => $labels,
-        'data' => $data
+        'internal_data' => $internal_data,
+        'external_data' => $external_data
     ];
 } elseif ($report_type === 'utilization') {
     $month = isset($_GET['month']) ? sanitize_input($_GET['month']) : date('Y-m');
@@ -179,9 +261,14 @@ if ($report_type === 'usage') {
         }
     }
     
-    // Build query based on status filter - bookings don't have facility_id
-    $query = "SELECT b.status, 'Gymnasium' as facility_name, COUNT(*) as booking_count 
+    // Build query based on status filter with user type breakdown
+    $query = "SELECT b.status, 'Gymnasium' as facility_name, 
+                     COUNT(*) as booking_count,
+                     COUNT(CASE WHEN u.user_type IN ('student', 'faculty', 'staff') THEN 1 END) as internal_count,
+                     COUNT(CASE WHEN u.user_type = 'external' THEN 1 END) as external_count,
+                     SUM(COALESCE(b.attendees, 0)) as total_attendees
               FROM bookings b 
+              LEFT JOIN user_accounts u ON b.user_id = u.id
               WHERE b.facility_type = 'gym' AND b.date BETWEEN ? AND ?";
     
     $params = [$start_date, $end_date];
@@ -198,20 +285,95 @@ if ($report_type === 'usage') {
         }
     }
     
-    $query .= " GROUP BY b.status ORDER BY b.status";
+    if ($user_type_filter === 'internal') {
+        $query .= " AND u.user_type IN ('student', 'faculty', 'staff')";
+    } elseif ($user_type_filter === 'external') {
+        $query .= " AND u.user_type = 'external'";
+    }
+    
+    $query .= " GROUP BY b.status ORDER BY COUNT(CASE WHEN u.user_type = 'external' THEN 1 END) DESC, b.status";
     
     $stmt = $conn->prepare($query);
     $stmt->bind_param($types, ...$params);
     $stmt->execute();
     $result = $stmt->get_result();
     
+    // Calculate collected amounts for external users
+    $collected_query = "SELECT b.status, b.additional_info
+                        FROM bookings b 
+                        LEFT JOIN user_accounts u ON b.user_id = u.id
+                        WHERE b.facility_type = 'gym' 
+                        AND b.date BETWEEN ? AND ?
+                        AND u.user_type = 'external'
+                        AND (b.status = 'confirmed' OR b.status = 'approved')
+                        AND b.or_number IS NOT NULL 
+                        AND b.or_number != ''
+                        AND b.additional_info IS NOT NULL";
+    
+    $collected_params = [$start_date, $end_date];
+    $collected_types = "ss";
+    
+    if (!empty($status)) {
+        if ($status === 'approved') {
+            $collected_query .= " AND (b.status = 'approved' OR b.status = 'confirmed')";
+        } else {
+            $collected_query .= " AND b.status = ?";
+            $collected_params[] = $status;
+            $collected_types .= "s";
+        }
+    }
+    
+    if ($user_type_filter === 'internal') {
+        $collected_query = "SELECT b.status, b.additional_info FROM bookings b WHERE 1=0";
+    }
+    
+    $collected_stmt = $conn->prepare($collected_query);
+    if ($user_type_filter !== 'internal') {
+        $collected_stmt->bind_param($collected_types, ...$collected_params);
+        $collected_stmt->execute();
+        $collected_result = $collected_stmt->get_result();
+        
+        $collected_by_status = [];
+        $total_collected = 0;
+        while ($collected_row = $collected_result->fetch_assoc()) {
+            $additional_info = json_decode($collected_row['additional_info'] ?? '{}', true) ?: [];
+            $cost_breakdown = $additional_info['cost_breakdown'] ?? [];
+            $total = isset($cost_breakdown['total']) ? (float)$cost_breakdown['total'] : 0;
+            
+            $status_key = $collected_row['status'];
+            if (!isset($collected_by_status[$status_key])) {
+                $collected_by_status[$status_key] = 0;
+            }
+            $collected_by_status[$status_key] += $total;
+            $total_collected += $total;
+        }
+    } else {
+        $collected_by_status = [];
+        $total_collected = 0;
+    }
+    
     while ($row = $result->fetch_assoc()) {
+        $row['internal_count'] = (int)$row['internal_count'];
+        $row['external_count'] = (int)$row['external_count'];
+        $row['total_attendees'] = (int)($row['total_attendees'] ?? 0);
+        $status_key = $row['status'];
+        // Handle approved/confirmed status for collected
+        if ($status_key === 'approved' || $status_key === 'confirmed') {
+            $collected = ($collected_by_status['approved'] ?? 0) + ($collected_by_status['confirmed'] ?? 0);
+        } else {
+            $collected = $collected_by_status[$status_key] ?? 0;
+        }
+        $row['collected'] = $collected;
         $report_data[] = $row;
     }
     
     // Prepare chart data
-    $status_query = "SELECT b.status, COUNT(*) as count 
+    $status_query = "SELECT b.status, 
+                            COUNT(*) as count,
+                            COUNT(CASE WHEN u.user_type IN ('student', 'faculty', 'staff') THEN 1 END) as internal_count,
+                            COUNT(CASE WHEN u.user_type = 'external' THEN 1 END) as external_count
                     FROM bookings b 
+                    LEFT JOIN user_accounts u ON b.user_id = u.id
                     WHERE b.facility_type = 'gym' AND b.date BETWEEN ? AND ?";
     
     $status_params = [$start_date, $end_date];
@@ -227,6 +389,12 @@ if ($report_type === 'usage') {
         }
     }
     
+    if ($user_type_filter === 'internal') {
+        $status_query .= " AND u.user_type IN ('student', 'faculty', 'staff')";
+    } elseif ($user_type_filter === 'external') {
+        $status_query .= " AND u.user_type = 'external'";
+    }
+    
     $status_query .= " GROUP BY b.status";
     
     $status_stmt = $conn->prepare($status_query);
@@ -235,7 +403,8 @@ if ($report_type === 'usage') {
     $status_result = $status_stmt->get_result();
     
     $labels = [];
-    $data = [];
+    $internal_data = [];
+    $external_data = [];
     
     while ($row = $status_result->fetch_assoc()) {
         $status_label = $row['status'];
@@ -244,12 +413,14 @@ if ($report_type === 'usage') {
             $status_label = 'approved';
         }
         $labels[] = ucfirst($status_label);
-        $data[] = $row['count'];
+        $internal_data[] = (int)$row['internal_count'];
+        $external_data[] = (int)$row['external_count'];
     }
     
     $chart_data = [
         'labels' => $labels,
-        'data' => $data
+        'internal_data' => $internal_data,
+        'external_data' => $external_data
     ];
 }
 ?>
@@ -329,6 +500,14 @@ if ($report_type === 'usage') {
                                 <label class="block text-sm text-gray-700 mb-1">End Date</label>
                                 <input type="date" name="end_date" value="<?php echo htmlspecialchars($end_date); ?>" class="w-full rounded-md border-gray-300">
                             </div>
+                            <div>
+                                <label class="block text-sm text-gray-700 mb-1">User Type</label>
+                                <select name="user_type" class="w-full rounded-md border-gray-300">
+                                    <option value="" <?php echo ($user_type_filter === '') ? 'selected' : ''; ?>>All Users</option>
+                                    <option value="internal" <?php echo ($user_type_filter === 'internal') ? 'selected' : ''; ?>>Internal</option>
+                                    <option value="external" <?php echo ($user_type_filter === 'external') ? 'selected' : ''; ?>>External</option>
+                                </select>
+                            </div>
                         <?php elseif ($report_type === 'utilization'): ?>
                             <div>
                                 <label class="block text-sm text-gray-700 mb-1">Month</label>
@@ -349,6 +528,14 @@ if ($report_type === 'usage') {
                                     <?php endwhile; ?>
                                 </select>
                             </div>
+                            <div>
+                                <label class="block text-sm text-gray-700 mb-1">User Type</label>
+                                <select name="user_type" class="w-full rounded-md border-gray-300">
+                                    <option value="" <?php echo ($user_type_filter === '') ? 'selected' : ''; ?>>All Users</option>
+                                    <option value="internal" <?php echo ($user_type_filter === 'internal') ? 'selected' : ''; ?>>Internal</option>
+                                    <option value="external" <?php echo ($user_type_filter === 'external') ? 'selected' : ''; ?>>External</option>
+                                </select>
+                            </div>
                         <?php elseif ($report_type === 'status'): ?>
                             <div>
                                 <label class="block text-sm text-gray-700 mb-1">Start Date</label>
@@ -364,9 +551,15 @@ if ($report_type === 'usage') {
                                     <option value="">All Statuses</option>
                                     <option value="pending" <?php echo ($status === 'pending') ? 'selected' : ''; ?>>Pending</option>
                                     <option value="approved" <?php echo ($status === 'approved') ? 'selected' : ''; ?>>Approved</option>
-                                    <option value="confirmed" <?php echo ($status === 'confirmed') ? 'selected' : ''; ?>>Confirmed</option>
                                     <option value="rejected" <?php echo ($status === 'rejected') ? 'selected' : ''; ?>>Rejected</option>
-                                    <option value="cancelled" <?php echo ($status === 'cancelled') ? 'selected' : ''; ?>>Cancelled</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm text-gray-700 mb-1">User Type</label>
+                                <select name="user_type" class="w-full rounded-md border-gray-300">
+                                    <option value="" <?php echo ($user_type_filter === '') ? 'selected' : ''; ?>>All Users</option>
+                                    <option value="internal" <?php echo ($user_type_filter === 'internal') ? 'selected' : ''; ?>>Internal</option>
+                                    <option value="external" <?php echo ($user_type_filter === 'external') ? 'selected' : ''; ?>>External</option>
                                 </select>
                             </div>
                         <?php endif; ?>
@@ -456,21 +649,63 @@ if ($report_type === 'usage') {
                                     <tr>
                                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
                                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Facility</th>
-                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Booking Count</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Bookings</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Internal</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">External</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Number of Attendees</th>
+                                        <?php if ($user_type_filter !== 'internal'): ?>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Collected</th>
+                                        <?php endif; ?>
                                     </tr>
                                 </thead>
                                 <tbody class="bg-white divide-y divide-gray-200">
                                     <?php if (count($report_data) > 0): ?>
-                                        <?php foreach ($report_data as $row): ?>
+                                        <?php 
+                                        $total_bookings = 0;
+                                        $total_internal = 0;
+                                        $total_external = 0;
+                                        $total_attendees = 0;
+                                        $total_collected = 0;
+                                        foreach ($report_data as $row): 
+                                            $total_bookings += $row['booking_count'];
+                                            $total_internal += $row['internal_count'];
+                                            $total_external += $row['external_count'];
+                                            $total_attendees += $row['total_attendees'] ?? 0;
+                                            $total_collected += $row['collected'] ?? 0;
+                                        ?>
                                             <tr>
                                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo date('F j, Y', strtotime($row['booking_date'])); ?></td>
                                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo $row['facility_name']; ?></td>
                                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo $row['booking_count']; ?></td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo $row['internal_count']; ?></td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo $row['external_count']; ?></td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo number_format($row['total_attendees'] ?? 0); ?></td>
+                                                <?php if ($user_type_filter !== 'internal'): ?>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">₱<?php echo number_format($row['collected'] ?? 0, 2); ?></td>
+                                                <?php endif; ?>
                                             </tr>
                                         <?php endforeach; ?>
+                                        <?php if ($user_type_filter !== 'internal'): ?>
+                                        <tr class="bg-gray-50 font-semibold">
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900" colspan="2">Total</td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo $total_bookings; ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo $total_internal; ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo $total_external; ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo number_format($total_attendees); ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">₱<?php echo number_format($total_collected, 2); ?></td>
+                                        </tr>
+                                        <?php else: ?>
+                                        <tr class="bg-gray-50 font-semibold">
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900" colspan="2">Total</td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo $total_bookings; ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo $total_internal; ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo $total_external; ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo number_format($total_attendees); ?></td>
+                                        </tr>
+                                        <?php endif; ?>
                                     <?php else: ?>
                                         <tr>
-                                            <td colspan="3" class="px-6 py-4 text-center text-sm text-gray-500">No data found for the selected period</td>
+                                            <td colspan="<?php echo ($user_type_filter !== 'internal') ? '6' : '5'; ?>" class="px-6 py-4 text-center text-sm text-gray-500">No data found for the selected period</td>
                                         </tr>
                                     <?php endif; ?>
                                 </tbody>
@@ -521,17 +756,39 @@ if ($report_type === 'usage') {
                                     <tr>
                                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                                         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Facility</th>
-                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Booking Count</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Bookings</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Internal</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">External</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Number of Attendees</th>
+                                        <?php if ($user_type_filter !== 'internal'): ?>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Collected</th>
+                                        <?php endif; ?>
                                     </tr>
                                 </thead>
                                 <tbody class="bg-white divide-y divide-gray-200">
                                     <?php if (count($report_data) > 0): ?>
-                                        <?php foreach ($report_data as $row): ?>
+                                        <?php 
+                                        $total_bookings = 0;
+                                        $total_internal = 0;
+                                        $total_external = 0;
+                                        $total_attendees = 0;
+                                        $total_collected = 0;
+                                        foreach ($report_data as $row): 
+                                            $total_bookings += $row['booking_count'];
+                                            $total_internal += $row['internal_count'];
+                                            $total_external += $row['external_count'];
+                                            $total_attendees += $row['total_attendees'] ?? 0;
+                                            $total_collected += $row['collected'] ?? 0;
+                                        ?>
                                             <tr>
                                                 <td class="px-6 py-4 whitespace-nowrap">
                                                     <?php 
                                                     $status_class = '';
-                                                    switch ($row['status']) {
+                                                    $status_display = $row['status'];
+                                                    if ($status_display === 'confirmed') {
+                                                        $status_display = 'approved';
+                                                    }
+                                                    switch ($status_display) {
                                                         case 'pending':
                                                             $status_class = 'bg-yellow-100 text-yellow-800';
                                                             break;
@@ -547,16 +804,40 @@ if ($report_type === 'usage') {
                                                     }
                                                     ?>
                                                     <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo $status_class; ?>">
-                                                        <?php echo ucfirst($row['status']); ?>
+                                                        <?php echo ucfirst($status_display); ?>
                                                     </span>
                                                 </td>
                                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo $row['facility_name']; ?></td>
                                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo $row['booking_count']; ?></td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo $row['internal_count']; ?></td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo $row['external_count']; ?></td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo number_format($row['total_attendees'] ?? 0); ?></td>
+                                                <?php if ($user_type_filter !== 'internal'): ?>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">₱<?php echo number_format($row['collected'] ?? 0, 2); ?></td>
+                                                <?php endif; ?>
                                             </tr>
                                         <?php endforeach; ?>
+                                        <?php if ($user_type_filter !== 'internal'): ?>
+                                        <tr class="bg-gray-50 font-semibold">
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900" colspan="2">Total</td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo $total_bookings; ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo $total_internal; ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo $total_external; ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo number_format($total_attendees); ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">₱<?php echo number_format($total_collected, 2); ?></td>
+                                        </tr>
+                                        <?php else: ?>
+                                        <tr class="bg-gray-50 font-semibold">
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900" colspan="2">Total</td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo $total_bookings; ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo $total_internal; ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo $total_external; ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><?php echo number_format($total_attendees); ?></td>
+                                        </tr>
+                                        <?php endif; ?>
                                     <?php else: ?>
                                         <tr>
-                                            <td colspan="3" class="px-6 py-4 text-center text-sm text-gray-500">No data found for the selected period</td>
+                                            <td colspan="<?php echo ($user_type_filter !== 'internal') ? '7' : '6'; ?>" class="px-6 py-4 text-center text-sm text-gray-500">No data found for the selected period</td>
                                         </tr>
                                     <?php endif; ?>
                                 </tbody>
@@ -583,16 +864,33 @@ if ($report_type === 'usage') {
         <?php if (!empty($chart_data)): ?>
             const chartData = {
                 labels: <?php echo json_encode($chart_data['labels']); ?>,
-                datasets: [{
-                    label: '<?php 
-                        if ($report_type === 'usage') echo 'Booking Count';
-                        elseif ($report_type === 'utilization') echo 'Utilization Rate (%)';
-                        elseif ($report_type === 'status') echo 'Booking Count by Status';
-                    ?>',
-                    data: <?php echo json_encode($chart_data['data']); ?>,
-                    backgroundColor: [
-                        'rgba(54, 162, 235, 0.2)',
-                        'rgba(255, 99, 132, 0.2)',
+                datasets: [
+                    <?php if (isset($chart_data['internal_data']) && isset($chart_data['external_data'])): ?>
+                    {
+                        label: 'Internal',
+                        data: <?php echo json_encode($chart_data['internal_data']); ?>,
+                        backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        borderWidth: 1
+                    },
+                    {
+                        label: 'External',
+                        data: <?php echo json_encode($chart_data['external_data']); ?>,
+                        backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                        borderColor: 'rgba(255, 99, 132, 1)',
+                        borderWidth: 1
+                    }
+                    <?php else: ?>
+                    {
+                        label: '<?php 
+                            if ($report_type === 'usage') echo 'Booking Count';
+                            elseif ($report_type === 'utilization') echo 'Utilization Rate (%)';
+                            elseif ($report_type === 'status') echo 'Booking Count by Status';
+                        ?>',
+                        data: <?php echo json_encode($chart_data['data'] ?? []); ?>,
+                        backgroundColor: [
+                            'rgba(54, 162, 235, 0.2)',
+                            'rgba(255, 99, 132, 0.2)',
                         'rgba(255, 206, 86, 0.2)',
                         'rgba(75, 192, 192, 0.2)',
                         'rgba(153, 102, 255, 0.2)',
@@ -607,7 +905,9 @@ if ($report_type === 'usage') {
                         'rgba(255, 159, 64, 1)'
                     ],
                     borderWidth: 1
-                }]
+                    }
+                    <?php endif; ?>
+                ]
             };
             
             const chartConfig = {

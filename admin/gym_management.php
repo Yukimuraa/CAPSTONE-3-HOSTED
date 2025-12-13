@@ -24,6 +24,61 @@ $create_table_sql = "CREATE TABLE IF NOT EXISTS gym_event_types (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
 $conn->query($create_table_sql);
 
+// Create gym_pricing_settings table if it doesn't exist
+$create_pricing_table_sql = "CREATE TABLE IF NOT EXISTS gym_pricing_settings (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    setting_key VARCHAR(100) NOT NULL UNIQUE,
+    setting_value DECIMAL(10, 2) DEFAULT 0.00,
+    description TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+$conn->query($create_pricing_table_sql);
+
+// Insert default pricing if table is empty
+$check_pricing = $conn->query("SELECT COUNT(*) as count FROM gym_pricing_settings");
+if ($check_pricing && $check_pricing->fetch_assoc()['count'] == 0) {
+    $default_pricing = [
+        ['key' => 'gymnasium_per_hour', 'value' => 700.00, 'description' => 'Gymnasium rental cost per hour'],
+        ['key' => 'sound_system_per_hour', 'value' => 150.00, 'description' => 'Sound system rental cost per hour'],
+        ['key' => 'electricity_per_hour', 'value' => 150.00, 'description' => 'Electricity cost per hour'],
+        ['key' => 'chair_free_limit', 'value' => 200.00, 'description' => 'Number of free chairs'],
+        ['key' => 'chair_cost_per_unit', 'value' => 8.00, 'description' => 'Cost per chair beyond free limit']
+    ];
+    $pricing_stmt = $conn->prepare("INSERT INTO gym_pricing_settings (setting_key, setting_value, description) VALUES (?, ?, ?)");
+    foreach ($default_pricing as $pricing) {
+        $pricing_stmt->bind_param("sds", $pricing['key'], $pricing['value'], $pricing['description']);
+        $pricing_stmt->execute();
+    }
+}
+
+// Create gym_equipment_services table if it doesn't exist
+$create_equipment_table_sql = "CREATE TABLE IF NOT EXISTS gym_equipment_services (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(255) NOT NULL UNIQUE,
+    type ENUM('equipment', 'service') DEFAULT 'equipment',
+    cost_per_hour DECIMAL(10, 2) DEFAULT 0.00,
+    description TEXT,
+    is_active TINYINT(1) DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+$conn->query($create_equipment_table_sql);
+
+// Insert default equipment/services if table is empty
+$check_equipment_defaults = $conn->query("SELECT COUNT(*) as count FROM gym_equipment_services");
+if ($check_equipment_defaults && $check_equipment_defaults->fetch_assoc()['count'] == 0) {
+    $default_equipment = [
+        ['name' => 'Sound System', 'type' => 'equipment', 'cost_per_hour' => 150.00, 'description' => 'Audio system for events'],
+        ['name' => 'Electricity', 'type' => 'service', 'cost_per_hour' => 150.00, 'description' => 'Electrical power supply'],
+        ['name' => 'Chairs', 'type' => 'equipment', 'cost_per_hour' => 0.00, 'description' => 'Seating chairs (first 200 free, then ₱8 per chair)']
+    ];
+    $equipment_stmt = $conn->prepare("INSERT INTO gym_equipment_services (name, type, cost_per_hour, description) VALUES (?, ?, ?, ?)");
+    foreach ($default_equipment as $equip) {
+        $equipment_stmt->bind_param("ssds", $equip['name'], $equip['type'], $equip['cost_per_hour'], $equip['description']);
+        $equipment_stmt->execute();
+    }
+}
+
 // Insert default event types if table is empty
 $check_defaults = $conn->query("SELECT COUNT(*) as count FROM gym_event_types");
 if ($check_defaults && $check_defaults->fetch_assoc()['count'] == 0) {
@@ -45,24 +100,65 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($_POST['action'] === 'approve' && isset($_POST['booking_id'])) {
             $booking_id = sanitize_input($_POST['booking_id']);
             $remarks = sanitize_input($_POST['remarks'] ?? '');
-            $or_number = sanitize_input($_POST['or_number'] ?? '');
+            $user_type = sanitize_input($_POST['user_type'] ?? 'student');
             
-            // Update booking with status, OR number, and remarks
+            // Get user type from booking to verify
+            $get_user_type = $conn->prepare("SELECT u.user_type FROM bookings b JOIN user_accounts u ON b.user_id = u.id WHERE b.booking_id = ?");
+            $get_user_type->bind_param("s", $booking_id);
+            $get_user_type->execute();
+            $user_type_result = $get_user_type->get_result();
+            
+            $or_number = '';
+            if ($user_type_result->num_rows > 0) {
+                $booking_user_type = $user_type_result->fetch_assoc()['user_type'];
+                // Require OR number only for external users
+                if ($booking_user_type === 'external') {
+            $or_number = sanitize_input($_POST['or_number'] ?? '');
+                    if (empty($or_number)) {
+                        $_SESSION['error'] = "OR number is required for external users.";
+                        header("Location: gym_management.php");
+                        exit();
+                    } elseif (!preg_match('/^[0-9]{7}$/', $or_number)) {
+                        $_SESSION['error'] = "OR number must be exactly 7 digits.";
+                        header("Location: gym_management.php");
+                        exit();
+                    }
+                }
+            }
+            
+            // Update booking with status, OR number (if external), and remarks
             $stmt = $conn->prepare("UPDATE bookings SET status = 'confirmed', or_number = ?, additional_info = JSON_SET(COALESCE(additional_info, '{}'), '$.admin_remarks', ?) WHERE booking_id = ? AND facility_type = 'gym'");
             $stmt->bind_param("sss", $or_number, $remarks, $booking_id);
             
             if ($stmt->execute()) {
                 $_SESSION['success'] = "Reservation has been approved successfully.";
                 
-                // Send notification to user
+                // Send notification to user (only if user exists)
                 require_once '../includes/notification_functions.php';
-                $get_booking = $conn->prepare("SELECT user_id, date FROM bookings WHERE booking_id = ?");
+                $get_booking = $conn->prepare("SELECT b.user_id, b.date, u.id as user_exists FROM bookings b LEFT JOIN user_accounts u ON b.user_id = u.id WHERE b.booking_id = ?");
                 $get_booking->bind_param("s", $booking_id);
                 $get_booking->execute();
                 $booking_result = $get_booking->get_result();
                 if ($booking_data = $booking_result->fetch_assoc()) {
+                    // Only create notification if user exists
+                    if (!empty($booking_data['user_exists'])) {
                     $date_formatted = date('F j, Y', strtotime($booking_data['date']));
-                    create_notification($booking_data['user_id'], "Gym Reservation Approved", "Your gym reservation (ID: {$booking_id}) for {$date_formatted} has been approved!", "success", "external/gym.php");
+                    // Determine correct link based on user type
+                    $get_user_type_link = $conn->prepare("SELECT u.user_type FROM bookings b JOIN user_accounts u ON b.user_id = u.id WHERE b.booking_id = ?");
+                    $get_user_type_link->bind_param("s", $booking_id);
+                    $get_user_type_link->execute();
+                    $user_type_link_result = $get_user_type_link->get_result();
+                    $notification_link = "student/gym.php"; // Default for students
+                    if ($user_type_link_result->num_rows > 0) {
+                        $user_type_for_link = $user_type_link_result->fetch_assoc()['user_type'];
+                        if ($user_type_for_link === 'external') {
+                            $notification_link = "external/gym.php";
+                        } elseif ($user_type_for_link === 'student') {
+                            $notification_link = "student/gym.php";
+                        }
+                    }
+                    create_notification($booking_data['user_id'], "Gym Reservation Approved", "Your gym reservation (ID: {$booking_id}) for {$date_formatted} has been approved!", "success", $notification_link);
+                    }
                 }
             } else {
                 $_SESSION['error'] = "Error approving reservation: " . $conn->error;
@@ -83,16 +179,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($stmt->execute()) {
                     $_SESSION['success'] = "Reservation has been rejected.";
                     
-                    // Send notification to user
+                    // Send notification to user (only if user exists)
                     require_once '../includes/notification_functions.php';
-                    $get_booking = $conn->prepare("SELECT user_id, date FROM bookings WHERE booking_id = ?");
+                    $get_booking = $conn->prepare("SELECT b.user_id, b.date, u.id as user_exists FROM bookings b LEFT JOIN user_accounts u ON b.user_id = u.id WHERE b.booking_id = ?");
                     $get_booking->bind_param("s", $booking_id);
                     $get_booking->execute();
                     $booking_result = $get_booking->get_result();
                     if ($booking_data = $booking_result->fetch_assoc()) {
+                        // Only create notification if user exists
+                        if (!empty($booking_data['user_exists'])) {
                         $date_formatted = date('F j, Y', strtotime($booking_data['date']));
                         $reason = !empty($remarks) ? " Reason: {$remarks}" : "";
-                        create_notification($booking_data['user_id'], "Gym Reservation Rejected", "Your gym reservation (ID: {$booking_id}) for {$date_formatted} has been rejected.{$reason}", "error", "external/gym.php");
+                        // Determine correct link based on user type
+                        $get_user_type_link = $conn->prepare("SELECT u.user_type FROM bookings b JOIN user_accounts u ON b.user_id = u.id WHERE b.booking_id = ?");
+                        $get_user_type_link->bind_param("s", $booking_id);
+                        $get_user_type_link->execute();
+                        $user_type_link_result = $get_user_type_link->get_result();
+                        $notification_link = "student/gym.php"; // Default for students
+                        if ($user_type_link_result->num_rows > 0) {
+                            $user_type_for_link = $user_type_link_result->fetch_assoc()['user_type'];
+                            if ($user_type_for_link === 'external') {
+                                $notification_link = "external/gym.php";
+                            } elseif ($user_type_for_link === 'student') {
+                                $notification_link = "student/gym.php";
+                            }
+                        }
+                        create_notification($booking_data['user_id'], "Gym Reservation Rejected", "Your gym reservation (ID: {$booking_id}) for {$date_formatted} has been rejected.{$reason}", "error", $notification_link);
+                        }
                     }
                 } else {
                     $_SESSION['error'] = "Error rejecting reservation: " . $conn->error;
@@ -250,6 +363,119 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $_SESSION['error'] = "Error updating event type status: " . $conn->error;
             }
         }
+        
+        // Add new equipment/service
+        elseif ($_POST['action'] === 'add_equipment_service') {
+            $equipment_name = sanitize_input($_POST['equipment_name']);
+            $equipment_type = sanitize_input($_POST['equipment_type']);
+            $cost_per_hour = isset($_POST['cost_per_hour']) ? (float)$_POST['cost_per_hour'] : 0.00;
+            $description = sanitize_input($_POST['description'] ?? '');
+            
+            if (empty($equipment_name)) {
+                $_SESSION['error'] = "Equipment/Service name is required.";
+            } else {
+                $stmt = $conn->prepare("INSERT INTO gym_equipment_services (name, type, cost_per_hour, description) VALUES (?, ?, ?, ?)");
+                $stmt->bind_param("ssds", $equipment_name, $equipment_type, $cost_per_hour, $description);
+                
+                if ($stmt->execute()) {
+                    $_SESSION['success'] = "Equipment/Service has been added successfully.";
+                } else {
+                    if ($conn->errno == 1062) {
+                        $_SESSION['error'] = "Equipment/Service already exists.";
+                    } else {
+                        $_SESSION['error'] = "Error adding equipment/service: " . $conn->error;
+                    }
+                }
+            }
+        }
+        
+        // Update equipment/service
+        elseif ($_POST['action'] === 'update_equipment_service' && isset($_POST['equipment_id'])) {
+            $equipment_id = (int)$_POST['equipment_id'];
+            $equipment_name = sanitize_input($_POST['equipment_name']);
+            $equipment_type = sanitize_input($_POST['equipment_type']);
+            $cost_per_hour = isset($_POST['cost_per_hour']) ? (float)$_POST['cost_per_hour'] : 0.00;
+            $description = sanitize_input($_POST['description'] ?? '');
+            
+            if (empty($equipment_name)) {
+                $_SESSION['error'] = "Equipment/Service name is required.";
+            } else {
+                $stmt = $conn->prepare("UPDATE gym_equipment_services SET name = ?, type = ?, cost_per_hour = ?, description = ? WHERE id = ?");
+                $stmt->bind_param("ssdsi", $equipment_name, $equipment_type, $cost_per_hour, $description, $equipment_id);
+                
+                if ($stmt->execute()) {
+                    $_SESSION['success'] = "Equipment/Service has been updated successfully.";
+                } else {
+                    if ($conn->errno == 1062) {
+                        $_SESSION['error'] = "Equipment/Service already exists.";
+                    } else {
+                        $_SESSION['error'] = "Error updating equipment/service: " . $conn->error;
+                    }
+                }
+            }
+        }
+        
+        // Delete equipment/service
+        elseif ($_POST['action'] === 'delete_equipment_service' && isset($_POST['equipment_id'])) {
+            $equipment_id = (int)$_POST['equipment_id'];
+            
+            $stmt = $conn->prepare("DELETE FROM gym_equipment_services WHERE id = ?");
+            $stmt->bind_param("i", $equipment_id);
+            
+            if ($stmt->execute()) {
+                $_SESSION['success'] = "Equipment/Service has been deleted successfully.";
+            } else {
+                $_SESSION['error'] = "Error deleting equipment/service: " . $conn->error;
+            }
+        }
+        
+        // Toggle equipment/service status
+        elseif ($_POST['action'] === 'toggle_equipment_service_status' && isset($_POST['equipment_id'])) {
+            $equipment_id = (int)$_POST['equipment_id'];
+            
+            $stmt = $conn->prepare("UPDATE gym_equipment_services SET is_active = NOT is_active WHERE id = ?");
+            $stmt->bind_param("i", $equipment_id);
+            
+            if ($stmt->execute()) {
+                $_SESSION['success'] = "Equipment/Service status has been updated successfully.";
+            } else {
+                $_SESSION['error'] = "Error updating equipment/service status: " . $conn->error;
+            }
+        }
+        
+        // Update pricing settings
+        elseif ($_POST['action'] === 'update_pricing') {
+            $gymnasium_per_hour = isset($_POST['gymnasium_per_hour']) ? (float)$_POST['gymnasium_per_hour'] : 700.00;
+            $sound_system_per_hour = isset($_POST['sound_system_per_hour']) ? (float)$_POST['sound_system_per_hour'] : 150.00;
+            $electricity_per_hour = isset($_POST['electricity_per_hour']) ? (float)$_POST['electricity_per_hour'] : 150.00;
+            $chair_free_limit = isset($_POST['chair_free_limit']) ? (float)$_POST['chair_free_limit'] : 200.00;
+            $chair_cost_per_unit = isset($_POST['chair_cost_per_unit']) ? (float)$_POST['chair_cost_per_unit'] : 8.00;
+            
+            $pricing_updates = [
+                'gymnasium_per_hour' => $gymnasium_per_hour,
+                'sound_system_per_hour' => $sound_system_per_hour,
+                'electricity_per_hour' => $electricity_per_hour,
+                'chair_free_limit' => $chair_free_limit,
+                'chair_cost_per_unit' => $chair_cost_per_unit
+            ];
+            
+            $update_stmt = $conn->prepare("UPDATE gym_pricing_settings SET setting_value = ? WHERE setting_key = ?");
+            $success = true;
+            
+            foreach ($pricing_updates as $key => $value) {
+                $update_stmt->bind_param("ds", $value, $key);
+                if (!$update_stmt->execute()) {
+                    $success = false;
+                    break;
+                }
+            }
+            
+            if ($success) {
+                $_SESSION['success'] = "Pricing settings have been updated successfully.";
+            } else {
+                $_SESSION['error'] = "Error updating pricing settings: " . $conn->error;
+            }
+        }
     }
     
     // Redirect to prevent form resubmission
@@ -325,7 +551,7 @@ $total_pages = ceil($total_rows / $per_page);
 // Ensure status is always returned, defaulting to 'pending' if NULL
 $requests_query = "SELECT b.booking_id, b.user_id, b.facility_type, b.date, b.start_time, b.end_time, 
                     b.purpose, b.attendees, COALESCE(b.status, 'pending') as status, b.additional_info, 
-                    b.created_at, b.updated_at, u.name as user_name, u.email as user_email 
+                    b.created_at, b.updated_at, u.name as user_name, u.email as user_email, u.user_type, u.role 
                     FROM bookings b
                     LEFT JOIN user_accounts u ON b.user_id = u.id
                     $conditions_sql
@@ -363,6 +589,30 @@ $facilities_management_result = $conn->query($facilities_management_query);
 // Get event types for management
 $event_types_query = "SELECT * FROM gym_event_types ORDER BY name ASC";
 $event_types_result = $conn->query($event_types_query);
+
+// Get equipment/services for management
+$equipment_services_query = "SELECT * FROM gym_equipment_services ORDER BY type ASC, name ASC";
+$equipment_services_result = $conn->query($equipment_services_query);
+
+// Get pricing settings
+$pricing_query = "SELECT setting_key, setting_value FROM gym_pricing_settings";
+$pricing_result = $conn->query($pricing_query);
+$pricing_settings = [];
+if ($pricing_result) {
+    while ($row = $pricing_result->fetch_assoc()) {
+        $pricing_settings[$row['setting_key']] = (float)$row['setting_value'];
+    }
+}
+// Set defaults if not found
+if (empty($pricing_settings)) {
+    $pricing_settings = [
+        'gymnasium_per_hour' => 700.00,
+        'sound_system_per_hour' => 150.00,
+        'electricity_per_hour' => 150.00,
+        'chair_free_limit' => 200.00,
+        'chair_cost_per_unit' => 8.00
+    ];
+}
 ?>
 
 <?php include '../includes/header.php'; ?>
@@ -411,6 +661,12 @@ $event_types_result = $conn->query($event_types_query);
                             </button>
                             <button class="tab-button border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm" data-tab="event-type">
                                 Event Type
+                            </button>
+                            <button class="tab-button border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm" data-tab="equipment-services">
+                                Equipment/Services
+                            </button>
+                            <button class="tab-button border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm" data-tab="pricing">
+                                Pricing
                             </button>
                         </nav>
                     </div>
@@ -575,6 +831,12 @@ $event_types_result = $conn->query($event_types_query);
                                             
                                             // Get letter path if exists
                                             $letter_path = $additional_info['letter_path'] ?? null;
+                                            
+                                            // Get total amount from cost_breakdown for external users
+                                            $total_amount = null;
+                                            if (($request['user_type'] ?? 'student') === 'external' && isset($additional_info['cost_breakdown']['total'])) {
+                                                $total_amount = (float)$additional_info['cost_breakdown']['total'];
+                                            }
                                             ?>
                                             <tr>
                                                 <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><?php echo $request['booking_id']; ?></td>
@@ -612,6 +874,8 @@ $event_types_result = $conn->query($event_types_query);
                                                             'id' => $request['booking_id'],
                                                             'user_name' => $request['user_name'],
                                                             'user_email' => $request['user_email'],
+                                                            'user_type' => $request['user_type'] ?? 'student',
+                                                            'role' => $request['role'] ?? null,
                                                             'facility_name' => $request['facility_type'],
                                                             'booking_date' => $request['date'],
                                                             'time_slot' => date('h:i A', strtotime($request['start_time'])) . ' - ' . date('h:i A', strtotime($request['end_time'])),
@@ -620,13 +884,14 @@ $event_types_result = $conn->query($event_types_query);
                                                             'participants' => $request['attendees'],
                                                             'status' => $request['status'],
                                                             'admin_remarks' => $admin_remarks,
-                                                            'letter_path' => $letter_path
+                                                            'letter_path' => $letter_path,
+                                                            'total_amount' => $total_amount
                                                         ])); ?>)">
                                                             <i class="fas fa-eye mr-1.5"></i>View
                                                         </button>
                                                         
                                                         <?php if ($request['status'] === 'pending'): ?>
-                                                            <button type="button" class="inline-flex items-center px-3 py-1.5 border border-green-300 shadow-sm text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500" onclick="openApproveModal('<?php echo $request['booking_id']; ?>')">
+                                                            <button type="button" class="inline-flex items-center px-3 py-1.5 border border-green-300 shadow-sm text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500" onclick="confirmAndApprove('<?php echo $request['booking_id']; ?>', '<?php echo $request['user_type'] ?? 'student'; ?>')">
                                                                 <i class="fas fa-check mr-1.5"></i>Approve
                                                             </button>
                                                             <button type="button" class="inline-flex items-center px-3 py-1.5 border border-red-300 shadow-sm text-sm font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500" onclick="openRejectModal('<?php echo $request['booking_id']; ?>')">
@@ -805,6 +1070,154 @@ $event_types_result = $conn->query($event_types_query);
                         </div>
                     </div>
                 </div>
+                
+                <!-- Equipment/Services Tab Content -->
+                <div id="equipment-services-tab" class="tab-content hidden">
+                    <!-- Add Equipment/Service Button -->
+                    <div class="mb-6">
+                        <button type="button" class="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" onclick="openAddEquipmentServiceModal()">
+                            <i class="fas fa-plus mr-1"></i> Add New Equipment/Service
+                        </button>
+                    </div>
+                    
+                    <!-- Equipment/Services Table -->
+                    <div class="bg-white rounded-lg shadow">
+                        <div class="px-4 py-5 border-b border-gray-200 sm:px-6">
+                            <h3 class="text-lg font-medium text-gray-900">Equipment/Services Needed</h3>
+                            <p class="mt-1 text-sm text-gray-500">Manage equipment and services available for gym reservations</p>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cost/Hour</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
+                                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="bg-white divide-y divide-gray-200">
+                                    <?php if ($equipment_services_result->num_rows > 0): ?>
+                                        <?php while ($equipment = $equipment_services_result->fetch_assoc()): ?>
+                                            <?php 
+                                            $status_class = $equipment['is_active'] ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800';
+                                            $status_text = $equipment['is_active'] ? 'Active' : 'Inactive';
+                                            $type_class = $equipment['type'] === 'equipment' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800';
+                                            $type_text = ucfirst($equipment['type']);
+                                            ?>
+                                            <tr>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><?php echo $equipment['id']; ?></td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo htmlspecialchars($equipment['name']); ?></td>
+                                                <td class="px-6 py-4 whitespace-nowrap">
+                                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo $type_class; ?>">
+                                                        <?php echo $type_text; ?>
+                                                    </span>
+                                                </td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">₱<?php echo number_format($equipment['cost_per_hour'], 2); ?></td>
+                                                <td class="px-6 py-4 text-sm text-gray-500"><?php echo htmlspecialchars($equipment['description'] ?? '-'); ?></td>
+                                                <td class="px-6 py-4 whitespace-nowrap">
+                                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo $status_class; ?>">
+                                                        <?php echo $status_text; ?>
+                                                    </span>
+                                                </td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                                    <button type="button" class="text-blue-600 hover:text-blue-900 mr-3" onclick="openEditEquipmentServiceModal(<?php echo htmlspecialchars(json_encode($equipment)); ?>)">
+                                                        Edit
+                                                    </button>
+                                                    <button type="button" class="text-red-600 hover:text-red-900 mr-3" onclick="openDeleteEquipmentServiceModal(<?php echo $equipment['id']; ?>, '<?php echo htmlspecialchars($equipment['name']); ?>')">
+                                                        Delete
+                                                    </button>
+                                                    <button type="button" class="text-<?php echo $equipment['is_active'] ? 'yellow' : 'green'; ?>-600 hover:text-<?php echo $equipment['is_active'] ? 'yellow' : 'green'; ?>-900" onclick="toggleEquipmentServiceStatus(<?php echo $equipment['id']; ?>)">
+                                                        <?php echo $equipment['is_active'] ? 'Deactivate' : 'Activate'; ?>
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        <?php endwhile; ?>
+                                    <?php else: ?>
+                                        <tr>
+                                            <td colspan="7" class="px-6 py-4 text-center text-sm text-gray-500">No equipment/services found</td>
+                                        </tr>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Pricing Tab Content -->
+                <div id="pricing-tab" class="tab-content hidden">
+                    <div class="bg-white rounded-lg shadow">
+                        <div class="px-4 py-5 border-b border-gray-200 sm:px-6">
+                            <h3 class="text-lg font-medium text-gray-900">Pricing Settings</h3>
+                            <p class="mt-1 text-sm text-gray-500">Manage gymnasium and equipment pricing</p>
+                        </div>
+                        <form method="POST" action="gym_management.php" class="p-6">
+                            <input type="hidden" name="action" value="update_pricing">
+                            <div class="space-y-6">
+                                <div>
+                                    <label for="gymnasium_per_hour" class="block text-sm font-medium text-gray-700 mb-2">
+                                        Gymnasium Cost per Hour (₱)
+                                    </label>
+                                    <input type="number" id="gymnasium_per_hour" name="gymnasium_per_hour" 
+                                           step="0.01" min="0" 
+                                           value="<?php echo number_format($pricing_settings['gymnasium_per_hour'], 2, '.', ''); ?>"
+                                           class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50">
+                                </div>
+                                
+                                <div>
+                                    <label for="sound_system_per_hour" class="block text-sm font-medium text-gray-700 mb-2">
+                                        Sound System Cost per Hour (₱)
+                                    </label>
+                                    <input type="number" id="sound_system_per_hour" name="sound_system_per_hour" 
+                                           step="0.01" min="0" 
+                                           value="<?php echo number_format($pricing_settings['sound_system_per_hour'], 2, '.', ''); ?>"
+                                           class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50">
+                                </div>
+                                
+                                <div>
+                                    <label for="electricity_per_hour" class="block text-sm font-medium text-gray-700 mb-2">
+                                        Electricity Cost per Hour (₱)
+                                    </label>
+                                    <input type="number" id="electricity_per_hour" name="electricity_per_hour" 
+                                           step="0.01" min="0" 
+                                           value="<?php echo number_format($pricing_settings['electricity_per_hour'], 2, '.', ''); ?>"
+                                           class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50">
+                                </div>
+                                
+                                <div>
+                                    <label for="chair_free_limit" class="block text-sm font-medium text-gray-700 mb-2">
+                                        Free Chairs Limit
+                                    </label>
+                                    <input type="number" id="chair_free_limit" name="chair_free_limit" 
+                                           step="1" min="0" 
+                                           value="<?php echo (int)$pricing_settings['chair_free_limit']; ?>"
+                                           class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50">
+                                    <p class="mt-1 text-xs text-gray-500">Number of chairs provided for free</p>
+                                </div>
+                                
+                                <div>
+                                    <label for="chair_cost_per_unit" class="block text-sm font-medium text-gray-700 mb-2">
+                                        Cost per Additional Chair (₱)
+                                    </label>
+                                    <input type="number" id="chair_cost_per_unit" name="chair_cost_per_unit" 
+                                           step="0.01" min="0" 
+                                           value="<?php echo number_format($pricing_settings['chair_cost_per_unit'], 2, '.', ''); ?>"
+                                           class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50">
+                                    <p class="mt-1 text-xs text-gray-500">Cost per chair beyond the free limit</p>
+                                </div>
+                                
+                                <div class="flex justify-end pt-4 border-t border-gray-200">
+                                    <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                                        <i class="fas fa-save mr-1"></i> Save Pricing Settings
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
             </div>
         </main>
     </div>
@@ -828,6 +1241,7 @@ $event_types_result = $conn->query($event_types_query);
                 <h4 class="text-sm font-medium text-gray-500">User</h4>
                 <p id="detail-user" class="mt-1 text-sm text-gray-900"></p>
                 <p id="detail-email" class="text-xs text-gray-500"></p>
+                <p id="detail-user-type" class="text-xs text-gray-500 mt-1"></p>
             </div>
             <div>
                 <h4 class="text-sm font-medium text-gray-500">Facility</h4>
@@ -849,6 +1263,10 @@ $event_types_result = $conn->query($event_types_query);
                 <h4 class="text-sm font-medium text-gray-500">Status</h4>
                 <p id="detail-status" class="mt-1 text-sm"></p>
             </div>
+            <div id="detail-total-container" class="hidden">
+                <h4 class="text-sm font-medium text-gray-500">Total Amount</h4>
+                <p id="detail-total" class="mt-1 text-sm text-gray-900 font-semibold"></p>
+            </div>
             <div id="detail-letter-container" class="hidden">
                 <h4 class="text-sm font-medium text-gray-500 mb-2">Letter from President</h4>
                 <div class="border border-gray-300 rounded-lg p-3 bg-gray-50">
@@ -867,7 +1285,7 @@ $event_types_result = $conn->query($event_types_query);
             </div>
         </div>
         <div class="mt-6 flex justify-end gap-2 p-6 pt-4 border-t border-gray-200 flex-shrink-0">
-            <button type="button" onclick="printGymReceipt()" class="inline-flex items-center px-4 py-2 border border-blue-300 shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+            <button type="button" id="print-receipt-btn" class="hidden inline-flex items-center px-4 py-2 border border-blue-300 shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500" onclick="printGymReceipt()">
                 <i class="fas fa-print mr-2"></i>Print Receipt
             </button>
             <button type="button" class="bg-gray-200 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2" onclick="closeBookingDetailsModal()">
@@ -878,71 +1296,97 @@ $event_types_result = $conn->query($event_types_query);
 </div>
 
 <!-- Approve Modal -->
-<div id="approveModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden z-50">
-    <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md">
-        <div class="flex justify-between items-center mb-4">
-            <h3 class="text-lg font-medium text-gray-900">Approve Booking</h3>
-            <button type="button" class="text-gray-400 hover:text-gray-500" onclick="closeApproveModal()">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-        
-        <!-- OR Number Question Section -->
-        <div id="orQuestionSection">
-            <div class="mb-4 bg-yellow-50 border-l-4 border-yellow-400 p-4">
-                <div class="flex">
-                    <div class="flex-shrink-0">
-                        <i class="fas fa-exclamation-triangle text-yellow-400"></i>
+<div id="approveModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden z-50 p-4">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-md">
+        <!-- Header with Icon -->
+        <div class="bg-gradient-to-r from-green-500 to-green-600 px-6 py-4 rounded-t-lg">
+            <div class="flex justify-between items-center">
+                <div class="flex items-center">
+                    <div class="w-12 h-12 bg-white bg-opacity-20 rounded-full flex items-center justify-center mr-3">
+                        <i class="fas fa-check-circle text-white text-2xl"></i>
                     </div>
-                    <div class="ml-3">
-                        <p class="text-sm text-yellow-700">
-                            <strong>Did the user show the OR No: from cashier?</strong>
-                        </p>
+                    <div>
+                        <h3 class="text-lg font-semibold text-white">Approve Booking</h3>
+                        <p id="approve-user-type-label" class="text-sm text-green-100"></p>
                     </div>
                 </div>
-            </div>
-            <div class="flex justify-end gap-3">
-                <button type="button" onclick="closeApproveModal()"
-                        class="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2">
-                    Cancel
-                </button>
-                <button type="button" onclick="handleOrNoResponse(true)" 
-                        class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
-                    Yes
-                </button>
+                <button type="button" class="text-white hover:text-gray-200 transition-colors" onclick="closeApproveModal()">
+                    <i class="fas fa-times text-xl"></i>
+            </button>
             </div>
         </div>
         
-        <!-- OR Number Input Form -->
-        <form id="approveForm" method="POST" action="gym_management.php" class="hidden">
+        <!-- Modal Body -->
+        <div class="p-6">
+            <!-- Confirmation Message for Student/Faculty/Staff -->
+            <div id="approve-confirmation-section" class="hidden mb-6">
+                <div class="text-center mb-6">
+                    <div class="inline-flex items-center justify-center w-20 h-20 bg-blue-100 rounded-full mb-4">
+                        <i class="fas fa-question-circle text-blue-600 text-4xl"></i>
+                    </div>
+                    <h4 class="text-xl font-semibold text-gray-800 mb-2">Are you sure you want to approve this booking?</h4>
+                    <p class="text-sm text-gray-600 mb-4">This action will confirm the gym reservation request.</p>
+                    </div>
+                
+                <!-- Booking Info Preview -->
+                <div class="bg-gray-50 rounded-lg p-4 mb-6">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-xs font-medium text-gray-500">Booking ID:</span>
+                        <span class="text-sm font-semibold text-gray-900" id="approve-preview-booking-id"></span>
+                </div>
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-medium text-gray-500">User Type:</span>
+                        <span class="text-sm font-semibold text-gray-900" id="approve-preview-user-type"></span>
+            </div>
+            </div>
+        </div>
+        
+            <form id="approveForm" method="POST" action="gym_management.php" onsubmit="return validateApproveForm(event)">
             <input type="hidden" name="action" value="approve">
             <input type="hidden" id="approve_booking_id" name="booking_id">
-            <div class="mb-4">
-                <label for="approve_or_number" class="block text-sm font-medium text-gray-700 mb-1">Official Receipt (OR) No:</label>
-                <input type="text" id="approve_or_number" name="or_number" required
-                       pattern="[0-9]*"
+                <input type="hidden" id="approve_user_type" name="user_type" value="">
+                
+                <!-- OR Number Field (External Users Only) -->
+                <div id="or_number_container" class="mb-4 hidden">
+                    <label for="approve_or_number" class="block text-sm font-medium text-gray-700 mb-2">
+                        <i class="fas fa-receipt text-blue-600 mr-2"></i>Official Receipt (OR) No: <span class="text-red-500">*</span>
+                    </label>
+                    <input type="text" id="approve_or_number" name="or_number" 
+                       pattern="[0-9]{7}"
+                       maxlength="7"
                        inputmode="numeric"
                        onkeypress="return (event.charCode >= 48 && event.charCode <= 57)"
-                       oninput="this.value = this.value.replace(/[^0-9]/g, '')"
-                       class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-emerald-500 focus:ring focus:ring-emerald-500 focus:ring-opacity-50"
-                       placeholder="Enter OR Number (Numbers only)">
-                <p class="mt-1 text-xs text-gray-500">Enter the OR number provided by the cashier (Numbers only)</p>
+                       oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 7)"
+                           class="w-full px-4 py-2.5 border-2 border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+                       placeholder="Enter OR Number (7 digits)">
+                    <p class="mt-2 text-xs text-gray-500 flex items-center">
+                        <i class="fas fa-info-circle mr-1"></i>Enter the OR number provided by the cashier (7 digits only)
+                    </p>
             </div>
-            <div class="mb-4">
-                <label for="approve_remarks" class="block text-sm font-medium text-gray-700 mb-1">Remarks (Optional)</label>
-                <textarea id="approve_remarks" name="remarks" rows="3" class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50"></textarea>
+                
+                <!-- Remarks Field (External Users Only) -->
+                <div id="remarks_container" class="mb-6 hidden">
+                    <label for="approve_remarks" class="block text-sm font-medium text-gray-700 mb-2">
+                        <i class="fas fa-comment-alt text-gray-500 mr-2"></i>Remarks (Optional)
+                    </label>
+                    <textarea id="approve_remarks" name="remarks" rows="3" 
+                              class="w-full px-4 py-2.5 border-2 border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors resize-none"
+                              placeholder="Add any additional notes or remarks..."></textarea>
             </div>
-            <div class="flex justify-end space-x-3">
+                
+                <!-- Action Buttons -->
+                <div class="flex justify-end space-x-3 pt-4 border-t border-gray-200">
                 <button type="button" onclick="closeApproveModal()"
-                        class="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2">
-                    Cancel
+                            class="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition-colors font-medium">
+                        <i class="fas fa-times mr-2"></i>Cancel
                 </button>
-                <button type="submit"
-                        class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2">
-                    <i class="fas fa-check mr-1"></i> Approve Booking
+                    <button type="submit" id="approve-submit-btn"
+                            class="px-5 py-2.5 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-lg hover:from-green-700 hover:to-green-800 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-all font-medium shadow-md hover:shadow-lg">
+                        <i class="fas fa-check-circle mr-2"></i><span id="approve-btn-text">Approve Booking</span>
                 </button>
             </div>
         </form>
+        </div>
     </div>
 </div>
 
@@ -1159,6 +1603,116 @@ $event_types_result = $conn->query($event_types_query);
     </div>
 </div>
 
+<!-- Add Equipment/Service Modal -->
+<div id="addEquipmentServiceModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden z-50">
+    <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-medium text-gray-900">Add New Equipment/Service</h3>
+            <button type="button" class="text-gray-400 hover:text-gray-500" onclick="closeAddEquipmentServiceModal()">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <form method="POST" action="gym_management.php">
+            <input type="hidden" name="action" value="add_equipment_service">
+            <div class="mb-4">
+                <label for="add-equipment-name" class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                <input type="text" id="add-equipment-name" name="equipment_name" required class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50" placeholder="e.g., Sound System">
+            </div>
+            <div class="mb-4">
+                <label for="add-equipment-type" class="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                <select id="add-equipment-type" name="equipment_type" required class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50">
+                    <option value="equipment">Equipment</option>
+                    <option value="service">Service</option>
+                </select>
+            </div>
+            <div class="mb-4">
+                <label for="add-cost-per-hour" class="block text-sm font-medium text-gray-700 mb-1">Cost per Hour (₱)</label>
+                <input type="number" id="add-cost-per-hour" name="cost_per_hour" step="0.01" min="0" value="0.00" class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50" placeholder="0.00">
+            </div>
+            <div class="mb-4">
+                <label for="add-equipment-description" class="block text-sm font-medium text-gray-700 mb-1">Description (Optional)</label>
+                <textarea id="add-equipment-description" name="description" rows="3" class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50" placeholder="Enter description..."></textarea>
+            </div>
+            <div class="flex justify-end">
+                <button type="button" class="bg-gray-200 text-gray-700 py-2 px-4 rounded-md mr-2 hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2" onclick="closeAddEquipmentServiceModal()">
+                    Cancel
+                </button>
+                <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                    Add
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Edit Equipment/Service Modal -->
+<div id="editEquipmentServiceModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden z-50">
+    <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-medium text-gray-900">Edit Equipment/Service</h3>
+            <button type="button" class="text-gray-400 hover:text-gray-500" onclick="closeEditEquipmentServiceModal()">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <form method="POST" action="gym_management.php">
+            <input type="hidden" name="action" value="update_equipment_service">
+            <input type="hidden" name="equipment_id" id="edit-equipment-id">
+            <div class="mb-4">
+                <label for="edit-equipment-name" class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                <input type="text" id="edit-equipment-name" name="equipment_name" required class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50">
+            </div>
+            <div class="mb-4">
+                <label for="edit-equipment-type" class="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                <select id="edit-equipment-type" name="equipment_type" required class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50">
+                    <option value="equipment">Equipment</option>
+                    <option value="service">Service</option>
+                </select>
+            </div>
+            <div class="mb-4">
+                <label for="edit-cost-per-hour" class="block text-sm font-medium text-gray-700 mb-1">Cost per Hour (₱)</label>
+                <input type="number" id="edit-cost-per-hour" name="cost_per_hour" step="0.01" min="0" class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50">
+            </div>
+            <div class="mb-4">
+                <label for="edit-equipment-description" class="block text-sm font-medium text-gray-700 mb-1">Description (Optional)</label>
+                <textarea id="edit-equipment-description" name="description" rows="3" class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50"></textarea>
+            </div>
+            <div class="flex justify-end">
+                <button type="button" class="bg-gray-200 text-gray-700 py-2 px-4 rounded-md mr-2 hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2" onclick="closeEditEquipmentServiceModal()">
+                    Cancel
+                </button>
+                <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                    Update
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Delete Equipment/Service Modal -->
+<div id="deleteEquipmentServiceModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden z-50">
+    <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-medium text-gray-900">Delete Equipment/Service</h3>
+            <button type="button" class="text-gray-400 hover:text-gray-500" onclick="closeDeleteEquipmentServiceModal()">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <p class="text-gray-700 mb-4">Are you sure you want to delete "<span id="delete-equipment-name"></span>"?</p>
+        <form method="POST" action="gym_management.php">
+            <input type="hidden" name="action" value="delete_equipment_service">
+            <input type="hidden" name="equipment_id" id="delete-equipment-id">
+            <div class="flex justify-end">
+                <button type="button" class="bg-gray-200 text-gray-700 py-2 px-4 rounded-md mr-2 hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2" onclick="closeDeleteEquipmentServiceModal()">
+                    Cancel
+                </button>
+                <button type="submit" class="bg-red-600 text-white py-2 px-4 rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2">
+                    Delete
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <script>
     // Mobile menu toggle
     document.getElementById('menu-button').addEventListener('click', function() {
@@ -1189,6 +1743,35 @@ $event_types_result = $conn->query($event_types_query);
         });
     });
     
+    // Helper function to format user name with role/type
+    function formatUserName(userName, userType, role) {
+        const roleLabels = {
+            'student': 'Student',
+            'faculty': 'Faculty',
+            'staff': 'Staff'
+        };
+        
+        const userTypeLabels = {
+            'admin': 'BAO Admin',
+            'secretary': 'BAO Secretary',
+            'staff': 'Staff',
+            'external': 'External User'
+        };
+        
+        // For students, use role if available
+        if (userType === 'student' && role && roleLabels[role]) {
+            return userName + ' (' + roleLabels[role] + ')';
+        }
+        
+        // For other user types, use user_type label
+        if (userTypeLabels[userType]) {
+            return userName + ' (' + userTypeLabels[userType] + ')';
+        }
+        
+        // Fallback
+        return userName;
+    }
+    
     // Store current booking ID for print receipt
     let currentBookingIdForPrint = '';
     
@@ -1196,8 +1779,49 @@ $event_types_result = $conn->query($event_types_query);
     function viewBookingDetails(booking) {
         currentBookingIdForPrint = booking.id;
         document.getElementById('detail-booking-id').textContent = booking.id;
-        document.getElementById('detail-user').textContent = booking.user_name;
+        document.getElementById('detail-user').textContent = formatUserName(booking.user_name, booking.user_type || 'student', booking.role || null);
         document.getElementById('detail-email').textContent = booking.user_email;
+        
+        // Display user type
+        const userTypeElement = document.getElementById('detail-user-type');
+        const userType = booking.user_type || 'student';
+        const role = booking.role || null;
+        
+        if (userType === 'student' && role) {
+            const roleLabels = {
+                'student': 'Student',
+                'faculty': 'Faculty',
+                'staff': 'Staff'
+            };
+            userTypeElement.textContent = 'User Type: ' + (roleLabels[role] || 'Student');
+        } else {
+            const userTypeLabels = {
+                'admin': 'BAO Admin',
+                'secretary': 'BAO Secretary',
+                'staff': 'Staff',
+                'external': 'External User'
+            };
+            userTypeElement.textContent = 'User Type: ' + (userTypeLabels[userType] || userType);
+        }
+        
+        // Show/hide print receipt button based on user type
+        const printReceiptBtn = document.getElementById('print-receipt-btn');
+        if (userType === 'external') {
+            printReceiptBtn.classList.remove('hidden');
+        } else {
+            printReceiptBtn.classList.add('hidden');
+        }
+        
+        // Show/hide total amount based on user type (external only)
+        const totalContainer = document.getElementById('detail-total-container');
+        const totalElement = document.getElementById('detail-total');
+        if (userType === 'external' && booking.total_amount !== null && booking.total_amount !== undefined) {
+            totalElement.textContent = '₱' + parseFloat(booking.total_amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            totalContainer.classList.remove('hidden');
+        } else {
+            totalContainer.classList.add('hidden');
+        }
+        
         document.getElementById('detail-facility').textContent = booking.facility_name;
         
         const bookingDate = new Date(booking.booking_date);
@@ -1292,30 +1916,119 @@ $event_types_result = $conn->query($event_types_query);
     }
     
     // Approve modal functions
-    function openApproveModal(bookingId) {
+    function confirmAndApprove(bookingId, userType) {
+        openApproveModal(bookingId, userType);
+    }
+    
+    function openApproveModal(bookingId, userType) {
         document.getElementById('approve_booking_id').value = bookingId;
-        // Reset modal to show OR question first
-        document.getElementById('orQuestionSection').classList.remove('hidden');
-        document.getElementById('approveForm').classList.add('hidden');
-        document.getElementById('approve_or_number').value = '';
+        document.getElementById('approve_user_type').value = userType;
         document.getElementById('approve_remarks').value = '';
+        
+        // Get user type label
+        const userTypeLabels = {
+            'student': 'Student',
+            'faculty': 'Faculty',
+            'staff': 'Staff',
+            'external': 'External User'
+        };
+        const userTypeLabel = userTypeLabels[userType] || 'User';
+        document.getElementById('approve-user-type-label').textContent = userTypeLabel + ' Booking';
+        
+        // Show/hide elements based on user type
+        const orNumberContainer = document.getElementById('or_number_container');
+        const orNumberInput = document.getElementById('approve_or_number');
+        const confirmationSection = document.getElementById('approve-confirmation-section');
+        const remarksContainer = document.getElementById('remarks_container');
+        const approveBtnText = document.getElementById('approve-btn-text');
+        
+        if (userType === 'external') {
+            // External users: Show OR number field and remarks, hide confirmation
+            orNumberContainer.classList.remove('hidden');
+            orNumberInput.required = true;
+            orNumberInput.value = '';
+            remarksContainer.classList.remove('hidden');
+            confirmationSection.classList.add('hidden');
+            approveBtnText.textContent = 'Approve Booking';
+        } else {
+            // Student/Faculty/Staff: Show confirmation, hide OR number and remarks
+            orNumberContainer.classList.add('hidden');
+            orNumberInput.required = false;
+            orNumberInput.value = '';
+            remarksContainer.classList.add('hidden');
+            const remarksField = document.getElementById('approve_remarks');
+            if (remarksField) {
+                remarksField.value = ''; // Clear remarks
+            }
+            confirmationSection.classList.remove('hidden');
+            document.getElementById('approve-preview-booking-id').textContent = bookingId;
+            document.getElementById('approve-preview-user-type').textContent = userTypeLabel;
+            approveBtnText.textContent = 'Yes, Approve';
+        }
+        
         document.getElementById('approveModal').classList.remove('hidden');
     }
     
     function closeApproveModal() {
         document.getElementById('approveModal').classList.add('hidden');
-        // Reset modal state
-        document.getElementById('orQuestionSection').classList.remove('hidden');
-        document.getElementById('approveForm').classList.add('hidden');
     }
     
-    function handleOrNoResponse(hasOrNo) {
-        // Show OR number input field
-        document.getElementById('orQuestionSection').classList.add('hidden');
-        document.getElementById('approveForm').classList.remove('hidden');
-        document.getElementById('approve_or_number').required = true;
-        document.getElementById('approve_or_number').focus();
+    // Validate approve form
+    function validateApproveForm(event) {
+        const userType = document.getElementById('approve_user_type').value;
+        const orNumberInput = document.getElementById('approve_or_number');
+        const remarksTextarea = document.getElementById('approve_remarks');
+        
+        // If external user, OR number is required and must be exactly 7 digits
+        if (userType === 'external') {
+            const orNumber = orNumberInput.value.trim();
+            if (!orNumber || orNumber === '') {
+                if (event) event.preventDefault();
+                alert('OR number is required for external users.');
+                orNumberInput.focus();
+                return false;
+            } else if (orNumber.length !== 7 || !/^[0-9]{7}$/.test(orNumber)) {
+                if (event) event.preventDefault();
+                alert('OR number must be exactly 7 digits.');
+                orNumberInput.focus();
+                return false;
+            }
+        } else {
+            // For student/faculty/staff, ensure remarks is empty
+            if (remarksTextarea) {
+                remarksTextarea.value = '';
+            }
+        }
+        
+        // Allow form to submit
+        return true;
     }
+    
+    // Setup OR number validation (7 digits only)
+    document.addEventListener('DOMContentLoaded', function() {
+        const orNumberInput = document.getElementById('approve_or_number');
+        if (orNumberInput) {
+            orNumberInput.addEventListener('input', function() {
+                // Remove any non-numeric characters and limit to 7 digits
+                this.value = this.value.replace(/[^0-9]/g, '').slice(0, 7);
+            });
+            
+            orNumberInput.addEventListener('blur', function() {
+                const value = this.value.trim();
+                if (value.length > 0 && value.length !== 7) {
+                    alert('OR number must be exactly 7 digits.');
+                    this.focus();
+                }
+            });
+            
+            orNumberInput.addEventListener('paste', function(e) {
+                e.preventDefault();
+                const pastedText = (e.clipboardData || window.clipboardData).getData('text');
+                const cleanedText = pastedText.replace(/[^0-9]/g, '').slice(0, 7);
+                this.value = cleanedText;
+            });
+        }
+    });
     
     // Reject modal functions
     function openRejectModal(bookingId) {
@@ -1425,6 +2138,68 @@ $event_types_result = $conn->query($event_types_query);
             window.open('print_gym_receipt.php?booking_id=' + currentBookingIdForPrint, '_blank');
         } else {
             alert('Booking ID not available');
+        }
+    }
+    
+    // Add equipment/service modal functions
+    function openAddEquipmentServiceModal() {
+        document.getElementById('addEquipmentServiceModal').classList.remove('hidden');
+        document.getElementById('add-equipment-name').value = '';
+        document.getElementById('add-equipment-type').value = 'equipment';
+        document.getElementById('add-cost-per-hour').value = '0.00';
+        document.getElementById('add-equipment-description').value = '';
+    }
+    
+    function closeAddEquipmentServiceModal() {
+        document.getElementById('addEquipmentServiceModal').classList.add('hidden');
+    }
+    
+    // Edit equipment/service modal functions
+    function openEditEquipmentServiceModal(equipment) {
+        document.getElementById('edit-equipment-id').value = equipment.id;
+        document.getElementById('edit-equipment-name').value = equipment.name;
+        document.getElementById('edit-equipment-type').value = equipment.type;
+        document.getElementById('edit-cost-per-hour').value = equipment.cost_per_hour;
+        document.getElementById('edit-equipment-description').value = equipment.description || '';
+        document.getElementById('editEquipmentServiceModal').classList.remove('hidden');
+    }
+    
+    function closeEditEquipmentServiceModal() {
+        document.getElementById('editEquipmentServiceModal').classList.add('hidden');
+    }
+    
+    // Delete equipment/service modal functions
+    function openDeleteEquipmentServiceModal(equipmentId, equipmentName) {
+        document.getElementById('delete-equipment-id').value = equipmentId;
+        document.getElementById('delete-equipment-name').textContent = equipmentName;
+        document.getElementById('deleteEquipmentServiceModal').classList.remove('hidden');
+    }
+    
+    function closeDeleteEquipmentServiceModal() {
+        document.getElementById('deleteEquipmentServiceModal').classList.add('hidden');
+    }
+    
+    // Toggle equipment/service status
+    function toggleEquipmentServiceStatus(equipmentId) {
+        if (confirm('Are you sure you want to change the status of this equipment/service?')) {
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = 'gym_management.php';
+            
+            const actionInput = document.createElement('input');
+            actionInput.type = 'hidden';
+            actionInput.name = 'action';
+            actionInput.value = 'toggle_equipment_service_status';
+            form.appendChild(actionInput);
+            
+            const idInput = document.createElement('input');
+            idInput.type = 'hidden';
+            idInput.name = 'equipment_id';
+            idInput.value = equipmentId;
+            form.appendChild(idInput);
+            
+            document.body.appendChild(form);
+            form.submit();
         }
     }
 </script>

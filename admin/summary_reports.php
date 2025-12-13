@@ -61,7 +61,7 @@ if ($gym_collections_result) {
     }
 }
 
-$collected_total = $col_orders + $col_bus + $col_gym;
+$collected_total = $col_orders + $col_gym;
 
 // Most requested service (by count)
 $svc = [ 'Gym' => $count_bookings, 'Bus' => $count_bus, 'Item Sales' => $count_orders, 'Requests' => $count_requests ];
@@ -155,12 +155,6 @@ arsort($svc); $top_service = key($svc);
 									<td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500"><?php echo number_format($count_bookings); ?></td>
 									<td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500"><?php echo number_format($approved_bookings); ?></td>
 									<td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500">₱<?php echo number_format($col_gym, 2); ?></td>
-								</tr>
-								<tr>
-									<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">Bus</td>
-									<td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500"><?php echo number_format($count_bus); ?></td>
-									<td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500"><?php echo number_format($approved_bus); ?></td>
-									<td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500">₱<?php echo number_format($col_bus,2); ?></td>
 								</tr>
 								<tr>
 									<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">Item Sales</td>

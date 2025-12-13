@@ -13,6 +13,17 @@ function create_notification($user_id, $title, $message, $type = 'info', $link =
         return false; // Table doesn't exist
     }
     
+    // Verify user exists before creating notification
+    $user_check = $conn->prepare("SELECT id FROM user_accounts WHERE id = ?");
+    if ($user_check) {
+        $user_check->bind_param("i", $user_id);
+        $user_check->execute();
+        $user_result = $user_check->get_result();
+        if ($user_result->num_rows == 0) {
+            return false; // User doesn't exist
+        }
+    }
+    
     $stmt = $conn->prepare("INSERT INTO notifications (user_id, title, message, type, link) VALUES (?, ?, ?, ?, ?)");
     if (!$stmt) {
         return false; // Error preparing statement

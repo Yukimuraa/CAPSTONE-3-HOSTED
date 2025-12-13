@@ -37,6 +37,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $status = $_POST['status'];
             $plate_number = isset($_POST['plate_number']) ? trim($_POST['plate_number']) : '';
             
+            // Validate bus_number - no symbols allowed
+            $invalid_symbols = ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '=', '{', '}', '[', ']', ':', ';', '"', "'", '<', '>', '?', '/', '\\', '|', '`', '~', ',', '.'];
+            $bus_number_has_symbols = false;
+            foreach ($invalid_symbols as $symbol) {
+                if (strpos($bus_number, $symbol) !== false) {
+                    $bus_number_has_symbols = true;
+                    break;
+                }
+            }
+            
+            // Validate plate_number - no symbols allowed
+            $plate_number_has_symbols = false;
+            if (!empty($plate_number)) {
+                foreach ($invalid_symbols as $symbol) {
+                    if (strpos($plate_number, $symbol) !== false) {
+                        $plate_number_has_symbols = true;
+                        break;
+                    }
+                }
+            }
+            
             // Ensure plate_number column exists
             $check_column = $conn->query("SHOW COLUMNS FROM buses LIKE 'plate_number'");
             if ($check_column->num_rows == 0) {
@@ -44,7 +65,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             
             // Validate inputs
-            if (empty($bus_number) || empty($vehicle_type) || $capacity <= 0) {
+            if ($bus_number_has_symbols) {
+                $error = 'Bus Number cannot contain symbols (! @ # $ % ^ & * ( ) _ + = { } [ ] : ; " \' < > ? / \\ | ` ~ , .).';
+            } elseif ($plate_number_has_symbols) {
+                $error = 'Plate Number cannot contain symbols (! @ # $ % ^ & * ( ) _ + = { } [ ] : ; " \' < > ? / \\ | ` ~ , .).';
+            } elseif (empty($bus_number) || empty($vehicle_type) || $capacity <= 0) {
                 $error = 'Please fill in all fields correctly.';
             } else {
                 // Check if bus number already exists
@@ -75,8 +100,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $capacity = intval($_POST['capacity']);
             $status = $_POST['status'];
             
+            // Validate bus_number - no symbols allowed
+            $invalid_symbols = ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '=', '{', '}', '[', ']', ':', ';', '"', "'", '<', '>', '?', '/', '\\', '|', '`', '~', ',', '.'];
+            $bus_number_has_symbols = false;
+            foreach ($invalid_symbols as $symbol) {
+                if (strpos($bus_number, $symbol) !== false) {
+                    $bus_number_has_symbols = true;
+                    break;
+                }
+            }
+            
+            // Validate plate_number - no symbols allowed
+            $plate_number_has_symbols = false;
+            if (!empty($plate_number)) {
+                foreach ($invalid_symbols as $symbol) {
+                    if (strpos($plate_number, $symbol) !== false) {
+                        $plate_number_has_symbols = true;
+                        break;
+                    }
+                }
+            }
+            
             // Validate inputs
-            if (empty($bus_number) || empty($vehicle_type) || $capacity <= 0) {
+            if ($bus_number_has_symbols) {
+                $error = 'Bus Number cannot contain symbols (! @ # $ % ^ & * ( ) _ + = { } [ ] : ; " \' < > ? / \\ | ` ~ , .).';
+            } elseif ($plate_number_has_symbols) {
+                $error = 'Plate Number cannot contain symbols (! @ # $ % ^ & * ( ) _ + = { } [ ] : ; " \' < > ? / \\ | ` ~ , .).';
+            } elseif (empty($bus_number) || empty($vehicle_type) || $capacity <= 0) {
                 $error = 'Please fill in all required fields correctly.';
             } else {
                 // Check if bus number already exists (excluding current bus)
@@ -140,31 +190,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Exception $e) {
                 $conn->rollback();
                 $error = 'Error deleting bus: ' . $e->getMessage();
-            }
-        } elseif ($_POST['action'] === 'update_fuel_rate') {
-            $new_fuel_rate = floatval($_POST['fuel_rate']);
-            
-            if ($new_fuel_rate <= 0) {
-                $error = 'Please enter a valid fuel rate.';
-            } else {
-                // Create settings table if not exists
-                $conn->query("CREATE TABLE IF NOT EXISTS bus_settings (
-                    id INT PRIMARY KEY AUTO_INCREMENT,
-                    setting_key VARCHAR(50) UNIQUE NOT NULL,
-                    setting_value VARCHAR(255) NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-                )");
-                
-                // Update or insert fuel rate
-                $stmt = $conn->prepare("INSERT INTO bus_settings (setting_key, setting_value) VALUES ('fuel_rate', ?) 
-                                       ON DUPLICATE KEY UPDATE setting_value = ?");
-                $stmt->bind_param("ss", $new_fuel_rate, $new_fuel_rate);
-                
-                if ($stmt->execute()) {
-                    $success = 'Fuel rate updated successfully to ₱' . number_format($new_fuel_rate, 2) . ' per liter!';
-                } else {
-                    $error = 'Error updating fuel rate: ' . $conn->error;
-                }
             }
         } elseif ($_POST['action'] === 'update_cost_settings') {
             // Create settings table if not exists
@@ -309,9 +334,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     require_once '../includes/notification_functions.php';
                     $schedule_user_id = $schedule['user_id'];
                     $date_formatted = date('F j, Y', strtotime($schedule['date_covered']));
-                    create_notification($schedule_user_id, "Bus Schedule Approved", "Your bus schedule request for {$date_formatted} (Destination: {$schedule['destination']}) has been approved!", "success", "student/bus.php");
+                    create_notification($schedule_user_id, "Bus Schedule Approved", "Your bus schedule request for {$date_formatted} (Destination: {$schedule['destination']}) has been approved! User may proceed with the trip according to instructions.", "success", "student/bus.php");
                     
-                    $success = 'Schedule approved successfully!';
+                    $success = 'Schedule approved successfully! User may proceed with the trip according to instructions.';
                 } catch (Exception $e) {
                     $conn->rollback();
                     $error = $e->getMessage();
@@ -364,6 +389,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $conn->rollback();
                 $error = 'Error rejecting schedule: ' . $e->getMessage();
             }
+        } elseif ($_POST['action'] === 'complete_schedule') {
+            $schedule_id = intval($_POST['schedule_id']);
+            
+            // Start transaction
+            $conn->begin_transaction();
+            
+            try {
+                // Update schedule status to completed
+                $update_stmt = $conn->prepare("UPDATE bus_schedules SET status = 'completed' WHERE id = ?");
+                $update_stmt->bind_param("i", $schedule_id);
+                $update_stmt->execute();
+                
+                // Get bus IDs from bookings for this schedule
+                $bus_ids_query = $conn->prepare("SELECT bus_id FROM bus_bookings WHERE schedule_id = ?");
+                $bus_ids_query->bind_param("i", $schedule_id);
+                $bus_ids_query->execute();
+                $bus_ids_result = $bus_ids_query->get_result();
+                
+                $bus_ids = [];
+                while ($row = $bus_ids_result->fetch_assoc()) {
+                    $bus_ids[] = $row['bus_id'];
+                }
+                
+                // Update bus status back to available after trip completion
+                if (count($bus_ids) > 0) {
+                    $bus_update_stmt = $conn->prepare("UPDATE buses SET status = 'available' WHERE id IN (" . implode(',', array_fill(0, count($bus_ids), '?')) . ")");
+                    $bus_update_stmt->bind_param(str_repeat('i', count($bus_ids)), ...$bus_ids);
+                    $bus_update_stmt->execute();
+                }
+                
+                $conn->commit();
+                
+                // Send notification to user
+                require_once '../includes/notification_functions.php';
+                $complete_schedule = $conn->prepare("SELECT user_id, date_covered, destination FROM bus_schedules WHERE id = ?");
+                $complete_schedule->bind_param("i", $schedule_id);
+                $complete_schedule->execute();
+                $complete_result = $complete_schedule->get_result();
+                if ($complete_data = $complete_result->fetch_assoc()) {
+                    $date_formatted = date('F j, Y', strtotime($complete_data['date_covered']));
+                    create_notification($complete_data['user_id'], "Bus Trip Completed", "Your bus trip for {$date_formatted} (Destination: {$complete_data['destination']}) has been completed. The bus trip has been finished.", "success", "student/bus.php");
+                }
+                
+                $success = 'Schedule marked as completed successfully! The bus trip has been finished.';
+            } catch (Exception $e) {
+                $conn->rollback();
+                $error = 'Error completing schedule: ' . $e->getMessage();
+            }
         }
     }
 }
@@ -374,12 +447,6 @@ $view_filter = isset($_GET['view']) ? $_GET['view'] : 'all';
 // Get active tab
 $active_tab = isset($_GET['tab']) ? $_GET['tab'] : 'schedules';
 
-// Get current fuel rate
-$fuel_rate_query = $conn->query("SELECT setting_value FROM bus_settings WHERE setting_key = 'fuel_rate'");
-$current_fuel_rate = 45.00; // Default
-if ($fuel_rate_query && $fuel_rate_query->num_rows > 0) {
-    $current_fuel_rate = floatval($fuel_rate_query->fetch_assoc()['setting_value']);
-}
 
 // Get current cost breakdown settings
 $cost_settings = [
@@ -491,10 +558,6 @@ include '../includes/header.php';
                 <a href="?tab=buses" 
                    class="flex-1 px-4 py-2 rounded-md text-center transition <?php echo $active_tab === 'buses' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'; ?>">
                     <i class="fas fa-bus mr-2"></i>Manage Buses
-                </a>
-                <a href="?tab=fuel" 
-                   class="flex-1 px-4 py-2 rounded-md text-center transition <?php echo $active_tab === 'fuel' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'; ?>">
-                    <i class="fas fa-gas-pump mr-2"></i>Fuel Rate
                 </a>
             </div>
         </div>
@@ -831,6 +894,10 @@ include '../includes/header.php';
                                                 $status_class = 'bg-green-100 text-green-800';
                                                 $status_text = 'Approved';
                                                 break;
+                                            case 'completed':
+                                                $status_class = 'bg-blue-100 text-blue-800';
+                                                $status_text = 'Completed';
+                                                break;
                                             case 'rejected':
                                                 $status_class = 'bg-red-100 text-red-800';
                                                 $status_text = 'Rejected';
@@ -868,6 +935,12 @@ include '../includes/header.php';
                                                         onclick="openRejectModal(<?php echo $row['id']; ?>, '<?php echo htmlspecialchars($row['client'], ENT_QUOTES); ?>', '<?php echo htmlspecialchars($row['destination'], ENT_QUOTES); ?>')"
                                                         title="Reject">
                                                     <i class="fas fa-times"></i>
+                                                </button>
+                                            <?php elseif ($row['status'] === 'approved'): ?>
+                                                <button type="button" class="text-blue-600 hover:text-blue-900" 
+                                                        onclick="openCompleteModal(<?php echo $row['id']; ?>, '<?php echo htmlspecialchars($row['client'], ENT_QUOTES); ?>', '<?php echo htmlspecialchars($row['destination'], ENT_QUOTES); ?>')"
+                                                        title="Mark as Completed">
+                                                    <i class="fas fa-check-double"></i>
                                                 </button>
                                             <?php endif; ?>
                                         </div>
@@ -961,26 +1034,28 @@ include '../includes/header.php';
                     
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Bus Number <span class="text-red-500">*</span></label>
-                        <input type="text" name="bus_number" required
+                        <input type="text" name="bus_number" id="add-bus-number" required
                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                               placeholder="e.g., 4, 5, Bus-001, van-20">
+                               placeholder="e.g., 4, 5, Bus-001"
+                               oninput="preventSymbols(this)"
+                               onkeypress="return !/[!@#$%^&*()_+={}\[\]:;&quot;'<>?\/\\|`~,.]/.test(event.key)">
                     </div>
                     
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Plate Number</label>
-                        <input type="text" name="plate_number"
+                        <input type="text" name="plate_number" id="add-plate-number"
                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                               placeholder="e.g., ABC-1234">
+                               placeholder="e.g., ABC-1234"
+                               oninput="preventSymbols(this)"
+                               onkeypress="return !/[!@#$%^&*()_+={}\[\]:;&quot;'<>?\/\\|`~,.]/.test(event.key)">
                     </div>
                     
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Vehicle Type <span class="text-red-500">*</span></label>
-                        <select name="vehicle_type" required
-                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
-                            <option value="Bus">Bus</option>
-                            <option value="Van">Van</option>
-                            <option value="Travis">Travis</option>
-                        </select>
+                        <input type="hidden" name="vehicle_type" value="Bus">
+                        <div class="w-full px-3 py-2 border border-gray-300 rounded-md bg-gray-100 text-gray-700">
+                            BUS
+                        </div>
                     </div>
                     
                     <div>
@@ -1087,186 +1162,6 @@ include '../includes/header.php';
             </div>
         </div>
         <?php endif; // End buses tab ?>
-        
-        <!-- FUEL RATE TAB -->
-        <?php if ($active_tab === 'fuel'): ?>
-        <div class="max-w-2xl mx-auto">
-            <div class="bg-white shadow rounded-lg p-6 mb-6">
-                <div class="flex items-center mb-4">
-                    <div class="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mr-4">
-                        <i class="fas fa-gas-pump text-blue-600 text-xl"></i>
-                    </div>
-                    <div>
-                        <h3 class="font-bold text-lg text-blue-900">Current Fuel Rate</h3>
-                        <p class="text-3xl font-bold text-green-600">₱<?php echo number_format($current_fuel_rate, 2); ?> <span class="text-sm text-gray-600">per liter</span></p>
-                    </div>
-                </div>
-                <p class="text-sm text-gray-600 mt-2">
-                    <i class="fas fa-info-circle mr-1"></i>This rate is used for calculating bus rental costs. Update it when fuel prices change.
-                </p>
-            </div>
-            
-            <div class="bg-white shadow rounded-lg p-6">
-                <h3 class="font-bold text-lg mb-4 flex items-center text-blue-900">
-                    <i class="fas fa-edit mr-2"></i>Update Fuel Rate
-                </h3>
-                <form method="POST" class="space-y-4">
-                    <input type="hidden" name="action" value="update_fuel_rate">
-                    
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">New Fuel Rate (₱ per liter) <span class="text-red-500">*</span></label>
-                        <input type="number" name="fuel_rate" required min="0.01" step="0.01" 
-                               value="<?php echo $current_fuel_rate; ?>"
-                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                               placeholder="e.g., 75.50">
-                        <p class="text-xs text-gray-500 mt-1">Enter the current market price for diesel/gasoline per liter</p>
-                    </div>
-                    
-                    <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4">
-                        <div class="flex">
-                            <div class="flex-shrink-0">
-                                <i class="fas fa-exclamation-triangle text-yellow-400"></i>
-                            </div>
-                            <div class="ml-3">
-                                <p class="text-sm text-yellow-700">
-                                    <strong>Important:</strong> This will affect all new bus rental calculations. Existing bookings will not be affected.
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <button type="submit" class="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition">
-                        <i class="fas fa-save mr-2"></i>Update Fuel Rate
-                    </button>
-                </form>
-            </div>
-            
-            <!-- Cost Breakdown Settings -->
-            <div class="bg-white shadow rounded-lg p-6 mt-6">
-                <h3 class="font-bold text-lg mb-4 flex items-center text-blue-900">
-                    <i class="fas fa-calculator mr-2"></i>Cost Breakdown Settings
-                </h3>
-                <p class="text-sm text-gray-600 mb-4">
-                    <i class="fas fa-info-circle mr-1"></i>Configure the cost breakdown values used in bus rental calculations.
-                </p>
-                
-                <!-- Current Values Display -->
-                <div class="bg-gray-50 rounded-lg p-4 mb-6">
-                    <h4 class="font-semibold text-sm text-gray-700 mb-3">Current Values:</h4>
-                    <div class="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
-                        <div>
-                            <span class="text-gray-600">Run Time (L):</span>
-                            <span class="font-semibold text-gray-900 ml-2"><?php echo number_format($cost_settings['runtime_liters'], 2); ?></span>
-                        </div>
-                        <div>
-                            <span class="text-gray-600">Maintenance Cost:</span>
-                            <span class="font-semibold text-gray-900 ml-2">₱<?php echo number_format($cost_settings['maintenance_cost'], 2); ?></span>
-                        </div>
-                        <div>
-                            <span class="text-gray-600">Standby Cost:</span>
-                            <span class="font-semibold text-gray-900 ml-2">₱<?php echo number_format($cost_settings['standby_cost'], 2); ?></span>
-                        </div>
-                        <div>
-                            <span class="text-gray-600">Additive Cost:</span>
-                            <span class="font-semibold text-gray-900 ml-2">₱<?php echo number_format($cost_settings['additive_cost'], 2); ?></span>
-                        </div>
-                        <div>
-                            <span class="text-gray-600">Rate per Bus:</span>
-                            <span class="font-semibold text-gray-900 ml-2">₱<?php echo number_format($cost_settings['rate_per_bus'], 2); ?></span>
-                        </div>
-                    </div>
-                </div>
-                <form method="POST" class="space-y-4">
-                    <input type="hidden" name="action" value="update_cost_settings">
-                    
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Run Time (L) <span class="text-red-500">*</span></label>
-                            <input type="number" name="runtime_liters" required min="0" step="0.01" 
-                                   value="<?php echo $cost_settings['runtime_liters']; ?>"
-                                   class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                   placeholder="25.00">
-                            <p class="text-xs text-gray-500 mt-1">Runtime in liters</p>
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Maintenance Cost (₱) <span class="text-red-500">*</span></label>
-                            <input type="number" name="maintenance_cost" required min="0" step="0.01" 
-                                   value="<?php echo $cost_settings['maintenance_cost']; ?>"
-                                   class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                   placeholder="5000.00">
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Standby Cost (₱) <span class="text-red-500">*</span></label>
-                            <input type="number" name="standby_cost" required min="0" step="0.01" 
-                                   value="<?php echo $cost_settings['standby_cost']; ?>"
-                                   class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                   placeholder="1500.00">
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Additive Cost (₱) <span class="text-red-500">*</span></label>
-                            <input type="number" name="additive_cost" required min="0" step="0.01" 
-                                   value="<?php echo $cost_settings['additive_cost']; ?>"
-                                   class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                   placeholder="1500.00">
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Rate per Bus (₱) <span class="text-red-500">*</span></label>
-                            <input type="number" name="rate_per_bus" required min="0" step="0.01" 
-                                   value="<?php echo $cost_settings['rate_per_bus']; ?>"
-                                   class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                   placeholder="1500.00">
-                        </div>
-                    </div>
-                    
-                    <div class="bg-blue-50 border-l-4 border-blue-400 p-4">
-                        <div class="flex">
-                            <div class="flex-shrink-0">
-                                <i class="fas fa-info-circle text-blue-400"></i>
-                            </div>
-                            <div class="ml-3">
-                                <p class="text-sm text-blue-700">
-                                    <strong>Note:</strong> These settings will be used for all new bus rental calculations. Existing bookings will not be affected.
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <button type="submit" class="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition">
-                        <i class="fas fa-save mr-2"></i>Update Cost Breakdown Settings
-                    </button>
-                </form>
-            </div>
-            
-            <!-- Fuel Rate History (Optional Enhancement) -->
-            <div class="bg-white shadow rounded-lg p-6 mt-6">
-                <h3 class="font-bold text-lg mb-4 flex items-center text-blue-900">
-                    <i class="fas fa-chart-line mr-2"></i>Fuel Rate Tips
-                </h3>
-                <ul class="space-y-2 text-sm text-gray-700">
-                    <li class="flex items-start">
-                        <i class="fas fa-check-circle text-green-500 mr-2 mt-1"></i>
-                        <span>Check local fuel prices regularly and update the rate accordingly</span>
-                    </li>
-                    <li class="flex items-start">
-                        <i class="fas fa-check-circle text-green-500 mr-2 mt-1"></i>
-                        <span>Keep records of when you update rates for accounting purposes</span>
-                    </li>
-                    <li class="flex items-start">
-                        <i class="fas fa-check-circle text-green-500 mr-2 mt-1"></i>
-                        <span>Consider adding a buffer to account for price fluctuations</span>
-                    </li>
-                    <li class="flex items-start">
-                        <i class="fas fa-check-circle text-green-500 mr-2 mt-1"></i>
-                        <span>This rate is used in combination with distance and vehicle consumption to calculate total fuel costs</span>
-                    </li>
-                </ul>
-            </div>
-        </div>
-        <?php endif; // End fuel tab ?>
         
     </main>
 </div>
@@ -1439,6 +1334,64 @@ include '../includes/header.php';
     </div>
 </div>
 
+<!-- Complete Schedule Modal -->
+<div id="completeModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden z-50">
+    <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md">
+        <div class="flex items-center mb-4">
+            <div class="flex-shrink-0 w-12 h-12 rounded-full bg-blue-100 flex items-center justify-center">
+                <i class="fas fa-check-double text-blue-600 text-xl"></i>
+            </div>
+            <div class="ml-4">
+                <h3 class="text-lg font-medium text-gray-900">Complete Bus Trip</h3>
+            </div>
+        </div>
+        
+        <div class="mb-6">
+            <div class="bg-gray-50 rounded-lg p-4 space-y-2 mb-4">
+                <div>
+                    <p class="text-xs font-medium text-gray-500">Client:</p>
+                    <p class="text-sm text-gray-900" id="complete-client"></p>
+                </div>
+                <div>
+                    <p class="text-xs font-medium text-gray-500">Destination:</p>
+                    <p class="text-sm text-gray-900" id="complete-destination"></p>
+                </div>
+            </div>
+            
+            <div class="bg-blue-50 border-l-4 border-blue-400 p-4">
+                <div class="flex">
+                    <div class="flex-shrink-0">
+                        <i class="fas fa-info-circle text-blue-400"></i>
+                    </div>
+                    <div class="ml-3">
+                        <p class="text-sm font-medium text-blue-800">
+                            Mark this trip as completed?
+                        </p>
+                        <p class="text-xs text-blue-600 mt-1">
+                            The bus trip has been finished. This will mark the schedule as completed and make the bus available again.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <form method="POST" id="completeForm">
+            <input type="hidden" name="action" value="complete_schedule">
+            <input type="hidden" name="schedule_id" id="complete-schedule-id">
+            
+            <div class="flex justify-end space-x-3">
+                <button type="button" onclick="closeCompleteModal()" class="px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500">
+                    Cancel
+                </button>
+                <button type="submit" class="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                    <i class="fas fa-check-double mr-1"></i>
+                    Yes, Mark as Completed
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <!-- Approve Schedule Modal -->
 <div id="approveModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden z-50">
     <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md">
@@ -1518,24 +1471,26 @@ include '../includes/header.php';
                     <label class="block text-sm font-medium text-gray-700 mb-1">Bus Number <span class="text-red-500">*</span></label>
                     <input type="text" name="bus_number" id="edit-bus-number" required
                            class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                           placeholder="e.g., 4, 5, Bus-001, van-20">
+                           placeholder="e.g., 4, 5, Bus-001"
+                           oninput="preventSymbols(this)"
+                           onkeypress="return !/[!@#$%^&*()_+={}\[\]:;&quot;'<>?\/\\|`~,.]/.test(event.key)">
                 </div>
                 
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Plate Number</label>
                     <input type="text" name="plate_number" id="edit-plate-number"
                            class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                           placeholder="e.g., ABC-1234">
+                           placeholder="e.g., ABC-1234"
+                           oninput="preventSymbols(this)"
+                           onkeypress="return !/[!@#$%^&*()_+={}\[\]:;&quot;'<>?\/\\|`~,.]/.test(event.key)">
                 </div>
                 
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Vehicle Type <span class="text-red-500">*</span></label>
-                    <select name="vehicle_type" id="edit-vehicle-type" required
-                            class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
-                        <option value="Bus">Bus</option>
-                        <option value="Van">Van</option>
-                        <option value="Travis">Travis</option>
-                    </select>
+                    <input type="hidden" name="vehicle_type" id="edit-vehicle-type" value="Bus">
+                    <div class="w-full px-3 py-2 border border-gray-300 rounded-md bg-gray-100 text-gray-700">
+                        BUS
+                    </div>
                 </div>
                 
                 <div>
@@ -1717,6 +1672,10 @@ function openViewModal(schedule) {
             statusElement.classList.add('bg-green-100', 'text-green-800');
             statusText = 'Approved';
             break;
+        case 'completed':
+            statusElement.classList.add('bg-blue-100', 'text-blue-800');
+            statusText = 'Completed';
+            break;
         case 'rejected':
             statusElement.classList.add('bg-red-100', 'text-red-800');
             statusText = 'Rejected';
@@ -1810,6 +1769,18 @@ function submitApproval() {
     document.getElementById('approveForm').submit();
 }
 
+// Complete Schedule Functions
+function openCompleteModal(scheduleId, client, destination) {
+    document.getElementById('complete-schedule-id').value = scheduleId;
+    document.getElementById('complete-client').textContent = client;
+    document.getElementById('complete-destination').textContent = destination;
+    document.getElementById('completeModal').classList.remove('hidden');
+}
+
+function closeCompleteModal() {
+    document.getElementById('completeModal').classList.add('hidden');
+}
+
 // Bus Status Management Functions
 function openStatusModal(busId, busNumber, currentStatus) {
     document.getElementById('status-bus-id').value = busId;
@@ -1820,6 +1791,12 @@ function openStatusModal(busId, busNumber, currentStatus) {
 
 function closeStatusModal() {
     document.getElementById('statusModal').classList.add('hidden');
+}
+
+// Prevent symbols function
+function preventSymbols(input) {
+    const invalidSymbols = /[!@#$%^&*()_+={}\[\]:;"'<>?\/\\|`~,.]/g;
+    input.value = input.value.replace(invalidSymbols, '');
 }
 
 // Bus Edit Functions
@@ -1875,6 +1852,53 @@ document.addEventListener('keydown', function(event) {
         closeStatusModal();
         closeEditBusModal();
         closeDeleteBusModal();
+    }
+});
+
+// Prevent symbols in Bus Number and Plate Number fields on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Add Bus form fields
+    const addBusNumber = document.getElementById('add-bus-number');
+    const addPlateNumber = document.getElementById('add-plate-number');
+    
+    if (addBusNumber) {
+        addBusNumber.addEventListener('paste', function(e) {
+            e.preventDefault();
+            const pastedText = (e.clipboardData || window.clipboardData).getData('text');
+            const cleanedText = pastedText.replace(/[!@#$%^&*()_+={}\[\]:;"'<>?\/\\|`~,.]/g, '');
+            this.value = cleanedText;
+        });
+    }
+    
+    if (addPlateNumber) {
+        addPlateNumber.addEventListener('paste', function(e) {
+            e.preventDefault();
+            const pastedText = (e.clipboardData || window.clipboardData).getData('text');
+            const cleanedText = pastedText.replace(/[!@#$%^&*()_+={}\[\]:;"'<>?\/\\|`~,.]/g, '');
+            this.value = cleanedText;
+        });
+    }
+    
+    // Edit Bus form fields (will be available when modal opens)
+    const editBusNumber = document.getElementById('edit-bus-number');
+    const editPlateNumber = document.getElementById('edit-plate-number');
+    
+    if (editBusNumber) {
+        editBusNumber.addEventListener('paste', function(e) {
+            e.preventDefault();
+            const pastedText = (e.clipboardData || window.clipboardData).getData('text');
+            const cleanedText = pastedText.replace(/[!@#$%^&*()_+={}\[\]:;"'<>?\/\\|`~,.]/g, '');
+            this.value = cleanedText;
+        });
+    }
+    
+    if (editPlateNumber) {
+        editPlateNumber.addEventListener('paste', function(e) {
+            e.preventDefault();
+            const pastedText = (e.clipboardData || window.clipboardData).getData('text');
+            const cleanedText = pastedText.replace(/[!@#$%^&*()_+={}\[\]:;"'<>?\/\\|`~,.]/g, '');
+            this.value = cleanedText;
+        });
     }
 });
 </script>

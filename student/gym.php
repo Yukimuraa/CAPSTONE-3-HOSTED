@@ -42,6 +42,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $contact_number = sanitize_input($_POST['contact_number']);
             $equipment = isset($_POST['equipment']) ? sanitize_input($_POST['equipment']) : '';
             $chair_pairs = isset($_POST['chair_pairs']) ? intval($_POST['chair_pairs']) : 0;
+            // Limit chairs to maximum 999
+            if ($chair_pairs > 999) {
+                $chair_pairs = 999;
+                $error_message = "Number of chairs has been limited to 999 (maximum allowed).";
+            }
             $other_event_type = isset($_POST['other_event_type']) && !empty($_POST['other_event_type']) ? sanitize_input($_POST['other_event_type']) : null;
             
             // Handle letter upload
@@ -84,8 +89,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $error_message = "Organization name must contain only letters and spaces.";
                 } elseif (!preg_match('/^[A-Za-z\s]+$/', $contact_person)) {
                     $error_message = "Contact person name must contain only letters and spaces.";
-                } elseif (!preg_match('/^[0-9]+$/', $contact_number)) {
-                    $error_message = "Contact number must contain only numbers.";
+                } elseif (!preg_match('/^[0-9]{11}$/', $contact_number)) {
+                    $error_message = "Contact number must be exactly 11 digits.";
                 }
             }
             
@@ -151,27 +156,74 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 					$duration = $start_datetime->diff($end_datetime);
 					$hours = $duration->h + ($duration->i / 60); // Convert minutes to decimal
 					
-					// Base gymnasium cost: 700 per hour
-					$gym_cost = $hours * 700;
+					// Get pricing settings from database
+					$pricing_query = "SELECT setting_key, setting_value FROM gym_pricing_settings";
+					$pricing_result = $conn->query($pricing_query);
+					$pricing_settings = [];
+					if ($pricing_result) {
+						while ($row = $pricing_result->fetch_assoc()) {
+							$pricing_settings[$row['setting_key']] = (float)$row['setting_value'];
+						}
+					}
+					// Set defaults if not found
+					if (empty($pricing_settings)) {
+						$pricing_settings = [
+							'gymnasium_per_hour' => 700.00,
+							'sound_system_per_hour' => 150.00,
+							'electricity_per_hour' => 150.00,
+							'chair_free_limit' => 200.00,
+							'chair_cost_per_unit' => 8.00
+						];
+					}
 					
-					// Equipment costs
+					// Base gymnasium cost from database
+					$gym_cost = $hours * $pricing_settings['gymnasium_per_hour'];
+					
+					// Equipment costs - calculate from database
 					$sound_system_cost = 0;
 					$electricity_cost = 0;
 					$chairs_cost = 0;
 					
-					if (strpos($equipment, 'Sound System') !== false) {
-						$sound_system_cost = $hours * 150; // Per hour
+					// Calculate costs based on selected equipment
+					if (!empty($equipment)) {
+						$equipment_list = explode(' + ', $equipment);
+						foreach ($equipment_list as $equip_item) {
+							$equip_item = trim($equip_item);
+							if (isset($equipment_services_data[$equip_item])) {
+								$cost_per_hour = $equipment_services_data[$equip_item]['cost_per_hour'];
+								// Calculate cost for this equipment
+								$equip_cost = $hours * $cost_per_hour;
+								
+								// Map to specific cost variables for compatibility
+								if (stripos($equip_item, 'Sound System') !== false) {
+									$sound_system_cost += $equip_cost;
+								} elseif (stripos($equip_item, 'Electricity') !== false) {
+									$electricity_cost += $equip_cost;
+								} elseif (stripos($equip_item, 'Chair') !== false) {
+									// Chairs cost is handled separately below
+								} else {
+									// For other equipment, add to sound_system_cost as a general equipment cost
+									// Or you can create a separate variable for other equipment
+									$sound_system_cost += $equip_cost;
+								}
+							} else {
+								// Fallback to hardcoded values if not in database
+								if (stripos($equip_item, 'Sound System') !== false) {
+									$sound_system_cost = $hours * 150;
+								} elseif (stripos($equip_item, 'Electricity') !== false) {
+									$electricity_cost = $hours * 150;
+								}
+							}
+						}
 					}
-					if (strpos($equipment, 'Electricity') !== false) {
-						$electricity_cost = $hours * 150; // Per hour
-					}
-					// Chairs are always available - calculate cost based on quantity
-					// First 200 chairs are free, then ₱8 per additional chair
+					// Chairs are always available - calculate cost based on quantity using database pricing
 					$chair_count = max(0, $chair_pairs);
-					if ($chair_count > 200) {
-						$chairs_cost = ($chair_count - 200) * 8; // ₱8 per chair beyond 200
+					$chair_free_limit = $pricing_settings['chair_free_limit'];
+					$chair_cost_per_unit = $pricing_settings['chair_cost_per_unit'];
+					if ($chair_count > $chair_free_limit) {
+						$chairs_cost = ($chair_count - $chair_free_limit) * $chair_cost_per_unit;
 					} else {
-						$chairs_cost = 0; // First 200 chairs are free
+						$chairs_cost = 0; // Within free limit
 					}
 					$number_of_pairs = 0; // Not used anymore, but keep for compatibility
 					
@@ -386,6 +438,29 @@ if (empty($event_types)) {
     $event_types = ['Badminton', 'Basketball', 'Volleyball', 'Graduation Ceremony', 'Sports Tournament', 'Conference', 'Cultural Event', 'School Program', 'Other'];
 }
 
+// Get equipment/services from database
+$equipment_services_query = "SELECT id, name, type, cost_per_hour, description FROM gym_equipment_services WHERE is_active = 1 ORDER BY type ASC, name ASC";
+$equipment_services_result = $conn->query($equipment_services_query);
+$equipment_services = [];
+$equipment_services_data = []; // Store full data for cost calculation
+
+if ($equipment_services_result) {
+    if ($equipment_services_result->num_rows > 0) {
+        while ($row = $equipment_services_result->fetch_assoc()) {
+            if (!empty($row['name'])) {
+                $equipment_services[] = $row['name'];
+                $equipment_services_data[$row['name']] = [
+                    'id' => $row['id'],
+                    'name' => $row['name'],
+                    'type' => $row['type'],
+                    'cost_per_hour' => $row['cost_per_hour'],
+                    'description' => $row['description']
+                ];
+            }
+        }
+    }
+}
+
 // Facilities query removed - no longer using facility dropdown
 
 // Note: We no longer fully disable dates on the calendar to allow partial-day bookings
@@ -491,11 +566,32 @@ if (empty($event_types)) {
                             
                             <div class="mt-6 pt-4 border-t border-gray-200">
                                 <h4 class="font-semibold text-gray-800 mb-3">Pricing Information</h4>
+                                <?php
+                                // Get pricing settings from database
+                                $pricing_query = "SELECT setting_key, setting_value FROM gym_pricing_settings";
+                                $pricing_result = $conn->query($pricing_query);
+                                $pricing_display = [];
+                                if ($pricing_result) {
+                                    while ($row = $pricing_result->fetch_assoc()) {
+                                        $pricing_display[$row['setting_key']] = (float)$row['setting_value'];
+                                    }
+                                }
+                                // Set defaults if not found
+                                if (empty($pricing_display)) {
+                                    $pricing_display = [
+                                        'gymnasium_per_hour' => 700.00,
+                                        'sound_system_per_hour' => 150.00,
+                                        'electricity_per_hour' => 150.00,
+                                        'chair_free_limit' => 200.00,
+                                        'chair_cost_per_unit' => 8.00
+                                    ];
+                                }
+                                ?>
                                 <ul class="list-disc pl-5 space-y-2 text-sm text-gray-700">
-                                    <li><strong>Gymnasium:</strong> ₱700 per hour</li>
-                                    <li><strong>Sound System:</strong> ₱150 per hour</li>
-                                    <li><strong>Electricity:</strong> ₱150 per hour</li>
-                                    <li><strong>Chairs:</strong> First 200 chairs are free, then ₱8 per additional chair</li>
+                                    <li><strong>Gymnasium:</strong> ₱<?php echo number_format($pricing_display['gymnasium_per_hour'], 2); ?> per hour</li>
+                                    <li><strong>Sound System:</strong> ₱<?php echo number_format($pricing_display['sound_system_per_hour'], 2); ?> per hour</li>
+                                    <li><strong>Electricity:</strong> ₱<?php echo number_format($pricing_display['electricity_per_hour'], 2); ?> per hour</li>
+                                    <li><strong>Chairs:</strong> First <?php echo (int)$pricing_display['chair_free_limit']; ?> chairs are free, then ₱<?php echo number_format($pricing_display['chair_cost_per_unit'], 2); ?> per additional chair</li>
                                 </ul>
                             </div>
                         </div>
@@ -816,20 +912,86 @@ if (empty($event_types)) {
                 <label for="equipment" class="block text-sm font-medium text-gray-700 mb-1">Equipment/Services Needed</label>
                 <select id="equipment" name="equipment" class="w-full rounded-md border-gray-300 shadow-sm focus:border-amber-500 focus:ring focus:ring-amber-500 focus:ring-opacity-50" onchange="toggleChairPairsField()">
                     <option value="">Select equipment/service</option>
-                    <option value="Sound System">Sound System</option>
-                    <option value="Electricity">Electricity</option>
-                    <option value="Chairs">Chairs</option>
-                    <option value="Sound System + Electricity">Sound System + Electricity</option>
-                    <option value="Sound System + Chairs">Sound System + Chairs</option>
-                    <option value="Electricity + Chairs">Electricity + Chairs</option>
-                    <option value="Sound System + Electricity + Chairs">Sound System + Electricity + Chairs</option>
+                    <?php if (!empty($equipment_services)): ?>
+                        <?php 
+                        // Generate all combinations (limit to 4 items max to avoid too many options)
+                        $equipment_count = count($equipment_services);
+                        $max_combinations = min(4, $equipment_count);
+                        
+                        // Single items
+                        foreach ($equipment_services as $equip): ?>
+                            <option value="<?php echo htmlspecialchars($equip); ?>"><?php echo htmlspecialchars($equip); ?></option>
+                        <?php endforeach; ?>
+                        
+                        <?php 
+                        // Generate combinations (2 items)
+                        if ($equipment_count >= 2):
+                            for ($i = 0; $i < $equipment_count; $i++): 
+                                for ($j = $i + 1; $j < $equipment_count; $j++): ?>
+                                    <option value="<?php echo htmlspecialchars($equipment_services[$i] . ' + ' . $equipment_services[$j]); ?>">
+                                        <?php echo htmlspecialchars($equipment_services[$i] . ' + ' . $equipment_services[$j]); ?>
+                                    </option>
+                                <?php endfor; 
+                            endfor;
+                        endif; ?>
+                        
+                        <?php 
+                        // Generate combinations (3 items)
+                        if ($equipment_count >= 3 && $max_combinations >= 3):
+                            for ($i = 0; $i < $equipment_count; $i++): 
+                                for ($j = $i + 1; $j < $equipment_count; $j++): 
+                                    for ($k = $j + 1; $k < $equipment_count; $k++): ?>
+                                        <option value="<?php echo htmlspecialchars($equipment_services[$i] . ' + ' . $equipment_services[$j] . ' + ' . $equipment_services[$k]); ?>">
+                                            <?php echo htmlspecialchars($equipment_services[$i] . ' + ' . $equipment_services[$j] . ' + ' . $equipment_services[$k]); ?>
+                                        </option>
+                                    <?php endfor; 
+                                endfor; 
+                            endfor;
+                        endif; ?>
+                        
+                        <?php 
+                        // Generate combinations (4 items)
+                        if ($equipment_count >= 4 && $max_combinations >= 4):
+                            for ($i = 0; $i < $equipment_count; $i++): 
+                                for ($j = $i + 1; $j < $equipment_count; $j++): 
+                                    for ($k = $j + 1; $k < $equipment_count; $k++): 
+                                        for ($l = $k + 1; $l < $equipment_count; $l++): ?>
+                                            <option value="<?php echo htmlspecialchars($equipment_services[$i] . ' + ' . $equipment_services[$j] . ' + ' . $equipment_services[$k] . ' + ' . $equipment_services[$l]); ?>">
+                                                <?php echo htmlspecialchars($equipment_services[$i] . ' + ' . $equipment_services[$j] . ' + ' . $equipment_services[$k] . ' + ' . $equipment_services[$l]); ?>
+                                            </option>
+                                        <?php endfor; 
+                                    endfor; 
+                                endfor; 
+                            endfor;
+                        endif; ?>
+                    <?php else: ?>
+                        <!-- Fallback if no equipment/services in database -->
+                        <option value="Sound System">Sound System</option>
+                        <option value="Electricity">Electricity</option>
+                        <option value="Chairs">Chairs</option>
+                        <option value="Sound System + Electricity">Sound System + Electricity</option>
+                        <option value="Sound System + Chairs">Sound System + Chairs</option>
+                        <option value="Electricity + Chairs">Electricity + Chairs</option>
+                        <option value="Sound System + Electricity + Chairs">Sound System + Electricity + Chairs</option>
+                    <?php endif; ?>
                 </select>
                 <p class="mt-1 text-xs text-gray-500">Select the equipment or services you need for your event</p>
             </div>
             <div class="mb-4" id="chairPairsField">
                 <label for="chair_pairs" class="block text-sm font-medium text-gray-700 mb-1">Number of Chairs</label>
-                <input type="number" id="chair_pairs" name="chair_pairs" min="0" value="0" class="w-full rounded-md border-gray-300 shadow-sm focus:border-amber-500 focus:ring focus:ring-amber-500 focus:ring-opacity-50">
-                <p class="mt-1 text-xs text-gray-500">First 200 chairs are free. Additional chairs beyond 200 are ₱8 each.</p>
+                <input type="number" id="chair_pairs" name="chair_pairs" min="0" max="999" step="1" value="0" class="w-full rounded-md border-gray-300 shadow-sm focus:border-amber-500 focus:ring focus:ring-amber-500 focus:ring-opacity-50" oninput="if(this.value > 999) this.value = 999;">
+                <?php
+                // Get pricing for chairs display
+                $chair_pricing_query = "SELECT setting_key, setting_value FROM gym_pricing_settings WHERE setting_key IN ('chair_free_limit', 'chair_cost_per_unit')";
+                $chair_pricing_result = $conn->query($chair_pricing_query);
+                $chair_pricing = ['chair_free_limit' => 200, 'chair_cost_per_unit' => 8];
+                if ($chair_pricing_result) {
+                    while ($row = $chair_pricing_result->fetch_assoc()) {
+                        $chair_pricing[$row['setting_key']] = (float)$row['setting_value'];
+                    }
+                }
+                ?>
+                <p class="mt-1 text-xs text-gray-500">First <?php echo (int)$chair_pricing['chair_free_limit']; ?> chairs are free. Additional chairs beyond <?php echo (int)$chair_pricing['chair_free_limit']; ?> are ₱<?php echo number_format($chair_pricing['chair_cost_per_unit'], 2); ?> each. Maximum: 999 chairs.</p>
             </div>
             <div class="mb-4">
                 <label for="attendees" class="block text-sm font-medium text-gray-700 mb-1">Expected Number of Attendees</label>
@@ -860,13 +1022,14 @@ if (empty($event_types)) {
                 <div>
                     <label for="contact_number" class="block text-sm font-medium text-gray-700 mb-1">Contact Number</label>
                     <input type="text" id="contact_number" name="contact_number" required 
-                           pattern="[0-9]+" 
-                           title="Contact number must contain only numbers"
+                           pattern="[0-9]{11}" 
+                           maxlength="11"
+                           title="Contact number must be exactly 11 digits"
                            inputmode="numeric"
                            onkeypress="return (event.charCode >= 48 && event.charCode <= 57)" 
-                           oninput="this.value = this.value.replace(/[^0-9]/g, '')"
+                           oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 11)"
                            class="w-full rounded-md border-gray-300 shadow-sm focus:border-amber-500 focus:ring focus:ring-amber-500 focus:ring-opacity-50">
-                    <p class="mt-1 text-xs text-gray-500">Numbers only</p>
+                    <p class="mt-1 text-xs text-gray-500">11 digits only</p>
                 </div>
             </div>
             </div>
@@ -958,52 +1121,6 @@ if (empty($event_types)) {
             </div>
             <?php endif; ?>
             
-            <!-- Cost Breakdown -->
-            <div class="bg-blue-50 p-4 rounded-lg border-2 border-blue-200">
-                <h4 class="font-semibold text-gray-800 mb-4">Cost Breakdown</h4>
-                <div class="space-y-2 text-sm">
-                    <div class="flex justify-between">
-                        <span class="text-gray-700">Gymnasium (₱700/hour × <?php echo $receipt['hours']; ?> hrs):</span>
-                        <span class="font-medium text-gray-900">₱<?php echo number_format($costs['gymnasium'], 2); ?></span>
-                    </div>
-                    <?php if ($costs['sound_system'] > 0): ?>
-                    <div class="flex justify-between">
-                        <span class="text-gray-700">Sound System (₱150/hour × <?php echo $receipt['hours']; ?> hrs):</span>
-                        <span class="font-medium text-gray-900">₱<?php echo number_format($costs['sound_system'], 2); ?></span>
-                    </div>
-                    <?php endif; ?>
-                    <?php if ($costs['electricity'] > 0): ?>
-                    <div class="flex justify-between">
-                        <span class="text-gray-700">Electricity (₱150/hour × <?php echo $receipt['hours']; ?> hrs):</span>
-                        <span class="font-medium text-gray-900">₱<?php echo number_format($costs['electricity'], 2); ?></span>
-                    </div>
-                    <?php endif; ?>
-                    <?php 
-                    $chairs_count = isset($receipt['chairs_count']) ? $receipt['chairs_count'] : 0;
-                    if ($chairs_count > 0): 
-                        $free_chairs = min(200, $chairs_count);
-                        $paid_chairs = max(0, $chairs_count - 200);
-                    ?>
-                    <div class="flex justify-between">
-                        <span class="text-gray-700">Chairs (<?php echo $chairs_count; ?> total):</span>
-                        <span class="font-medium text-gray-900">
-                            <?php if ($chairs_count <= 200): ?>
-                                Free (<?php echo $chairs_count; ?> chairs)
-                            <?php else: ?>
-                                ₱<?php echo number_format($costs['chairs'], 2); ?> (<?php echo $free_chairs; ?> free + <?php echo $paid_chairs; ?> × ₱8)
-                            <?php endif; ?>
-                        </span>
-                    </div>
-                    <?php endif; ?>
-                    <div class="border-t-2 border-blue-300 pt-2 mt-2">
-                        <div class="flex justify-between">
-                            <span class="font-bold text-lg text-gray-900">Total Amount:</span>
-                            <span class="font-bold text-lg text-green-600">₱<?php echo number_format($costs['total'], 2); ?></span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
             <!-- Status Note -->
             <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded">
                 <p class="text-sm text-yellow-800">
@@ -1015,9 +1132,6 @@ if (empty($event_types)) {
         </div>
         
         <div class="mt-6 flex justify-end gap-2 p-6 pt-4 border-t border-gray-200 flex-shrink-0">
-            <button type="button" class="bg-gray-200 text-gray-700 py-2 px-6 rounded-md hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2" onclick="printReceipt()">
-                <i class="fas fa-print mr-2"></i>Print Receipt
-            </button>
             <button type="button" class="bg-blue-600 text-white py-2 px-6 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" onclick="closeReceiptModal()">
                 Close
             </button>
@@ -1215,6 +1329,31 @@ if (empty($event_types)) {
             return false;
         }
         
+        // Validate number of chairs (max 999)
+        const chairPairsInput = document.getElementById('chair_pairs');
+        if (chairPairsInput && parseInt(chairPairsInput.value) > 999) {
+            alert('Number of chairs cannot exceed 999. Please enter a valid number.');
+            chairPairsInput.focus();
+            chairPairsInput.value = 999;
+            return false;
+        }
+        
+        // Validate contact number (exactly 11 digits)
+        const contactNumberInput = document.getElementById('contact_number');
+        if (contactNumberInput) {
+            const contactNumber = contactNumberInput.value.trim();
+            if (contactNumber.length !== 11) {
+                alert('Contact number must be exactly 11 digits.');
+                contactNumberInput.focus();
+                return false;
+            }
+            if (!/^[0-9]{11}$/.test(contactNumber)) {
+                alert('Contact number must contain only numbers (11 digits).');
+                contactNumberInput.focus();
+                return false;
+            }
+        }
+        
         return true;
     }
     
@@ -1347,6 +1486,24 @@ if (empty($event_types)) {
         // Chairs are always available, so keep the field visible
         document.getElementById('chairPairsField').style.display = 'block';
         document.getElementById('chair_pairs').value = 0;
+        
+        // Add validation for chair_pairs input
+        const chairPairsInput = document.getElementById('chair_pairs');
+        if (chairPairsInput) {
+            chairPairsInput.addEventListener('input', function() {
+                if (this.value > 999) {
+                    this.value = 999;
+                    alert('Maximum number of chairs is 999.');
+                }
+            });
+            
+            chairPairsInput.addEventListener('blur', function() {
+                if (this.value > 999) {
+                    this.value = 999;
+                    alert('Maximum number of chairs is 999.');
+                }
+            });
+        }
     }
     
     // Details modal functions
@@ -1473,20 +1630,6 @@ if (empty($event_types)) {
         }
     }
     
-    function printReceipt() {
-        // Get receipt data from the modal
-        <?php if (isset($_SESSION['booking_receipt'])): ?>
-        const bookingId = '<?php echo $_SESSION['booking_receipt']['booking_id']; ?>';
-        if (bookingId) {
-            // Open print receipt page in new window
-            window.open('print_gym_receipt.php?booking_id=' + bookingId, '_blank');
-        } else {
-            alert('Receipt data not available');
-        }
-        <?php else: ?>
-        alert('Receipt data not available');
-        <?php endif; ?>
-    }
     
     // Helper functions
     function formatDate(dateString) {
@@ -1510,6 +1653,48 @@ if (empty($event_types)) {
             document.getElementById('receiptModal').classList.remove('hidden');
         }, 500);
         <?php endif; ?>
+        
+        // Setup chair pairs validation
+        const chairPairsInput = document.getElementById('chair_pairs');
+        if (chairPairsInput) {
+            chairPairsInput.addEventListener('input', function() {
+                if (this.value > 999) {
+                    this.value = 999;
+                    alert('Maximum number of chairs is 999.');
+                }
+            });
+            
+            chairPairsInput.addEventListener('blur', function() {
+                if (this.value > 999) {
+                    this.value = 999;
+                    alert('Maximum number of chairs is 999.');
+                }
+            });
+        }
+        
+        // Setup contact number validation (11 digits only)
+        const contactNumberInput = document.getElementById('contact_number');
+        if (contactNumberInput) {
+            contactNumberInput.addEventListener('input', function() {
+                // Remove any non-numeric characters and limit to 11 digits
+                this.value = this.value.replace(/[^0-9]/g, '').slice(0, 11);
+            });
+            
+            contactNumberInput.addEventListener('blur', function() {
+                const value = this.value.trim();
+                if (value.length > 0 && value.length !== 11) {
+                    alert('Contact number must be exactly 11 digits.');
+                    this.focus();
+                }
+            });
+            
+            contactNumberInput.addEventListener('paste', function(e) {
+                e.preventDefault();
+                const pastedText = (e.clipboardData || window.clipboardData).getData('text');
+                const cleanedText = pastedText.replace(/[^0-9]/g, '').slice(0, 11);
+                this.value = cleanedText;
+            });
+        }
         // Initialize flatpickr calendar (do not disable entire dates)
         // Calculate minimum date (3 days from today)
         const today = new Date();

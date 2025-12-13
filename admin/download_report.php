@@ -266,17 +266,264 @@ switch ($report_type) {
         }
         
         $data[] = ['Gym', number_format($count_bookings), number_format($approved_bookings), '₱' . number_format($col_gym, 2)];
-        $data[] = ['Bus', number_format($count_bus), number_format($approved_bus), '₱' . number_format($col_bus, 2)];
         $data[] = ['Item Sales', number_format($count_orders), number_format($completed_orders), '₱' . number_format($col_orders, 2)];
         
         // Calculate totals
         $total_requests = $count_bookings + $count_bus + $count_orders;
         $total_approved = $approved_bookings + $approved_bus + $completed_orders;
-        $total_collected = $col_gym + $col_bus + $col_orders;
+        $total_collected = $col_gym + $col_orders;
         break;
         
     case 'gym':
-        // Gym reports - show detailed booking information
+        $report_type_param = isset($_GET['report_type']) ? sanitize_input($_GET['report_type']) : '';
+        $user_type_filter = isset($_GET['user_type']) ? sanitize_input($_GET['user_type']) : '';
+        
+        // Handle different gym report types from gym_reports.php
+        if ($report_type_param === 'usage') {
+            $start_date = isset($_GET['start_date']) ? sanitize_input($_GET['start_date']) : date('Y-m-d', strtotime('-30 days'));
+            $end_date = isset($_GET['end_date']) ? sanitize_input($_GET['end_date']) : date('Y-m-d');
+            
+            $title = 'Gym Usage Report';
+            $headers = ['Date', 'Facility', 'Total Bookings', 'Internal', 'External', 'Number of Attendees'];
+            
+            // Only add Collected header if showing external or all users
+            if ($user_type_filter !== 'internal') {
+                $headers[] = 'Collected';
+            }
+            
+            $query = "SELECT b.date as booking_date, 'Gymnasium' as facility_name, 
+                             COUNT(*) as booking_count,
+                             COUNT(CASE WHEN u.user_type IN ('student', 'faculty', 'staff') THEN 1 END) as internal_count,
+                             COUNT(CASE WHEN u.user_type = 'external' THEN 1 END) as external_count,
+                             SUM(COALESCE(b.attendees, 0)) as total_attendees
+                      FROM bookings b 
+                      LEFT JOIN user_accounts u ON b.user_id = u.id
+                      WHERE b.facility_type = 'gym' AND b.date BETWEEN ? AND ?";
+            
+            $params = [$start_date, $end_date];
+            $types = "ss";
+            
+            if ($user_type_filter === 'internal') {
+                $query .= " AND u.user_type IN ('student', 'faculty', 'staff')";
+            } elseif ($user_type_filter === 'external') {
+                $query .= " AND u.user_type = 'external'";
+            }
+            
+            $query .= " GROUP BY b.date ORDER BY COUNT(CASE WHEN u.user_type = 'external' THEN 1 END) DESC, b.date DESC";
+            
+            $stmt = $conn->prepare($query);
+            $stmt->bind_param($types, ...$params);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            
+            // Get collected amounts (external only)
+            $collected_query = "SELECT b.date, b.additional_info
+                                FROM bookings b 
+                                LEFT JOIN user_accounts u ON b.user_id = u.id
+                                WHERE b.facility_type = 'gym' 
+                                AND b.date BETWEEN ? AND ?
+                                AND u.user_type = 'external'
+                                AND (b.status = 'confirmed' OR b.status = 'approved')
+                                AND b.or_number IS NOT NULL 
+                                AND b.or_number != ''
+                                AND b.additional_info IS NOT NULL";
+            
+            $collected_stmt = $conn->prepare($collected_query);
+            $collected_stmt->bind_param($types, ...$params);
+            $collected_stmt->execute();
+            $collected_result = $collected_stmt->get_result();
+            
+            $collected_by_date = [];
+            while ($collected_row = $collected_result->fetch_assoc()) {
+                if (!empty($collected_row['additional_info'])) {
+                    $additional_info = json_decode($collected_row['additional_info'], true);
+                    if (isset($additional_info['cost_breakdown']['total'])) {
+                        $date = $collected_row['date'];
+                        $collected_by_date[$date] = ($collected_by_date[$date] ?? 0) + (float)$additional_info['cost_breakdown']['total'];
+                    }
+                }
+            }
+            
+            $total_collected = 0;
+            $total_bookings = 0;
+            $total_internal = 0;
+            $total_external = 0;
+            $total_attendees = 0;
+            
+            while ($row = $result->fetch_assoc()) {
+                $collected = $collected_by_date[$row['booking_date']] ?? 0;
+                $total_collected += $collected;
+                $total_bookings += $row['booking_count'];
+                $total_internal += ($row['internal_count'] ?? 0);
+                $total_external += ($row['external_count'] ?? 0);
+                $total_attendees += (int)($row['total_attendees'] ?? 0);
+                
+                $row_data = [
+                    date('F j, Y', strtotime($row['booking_date'])),
+                    $row['facility_name'],
+                    number_format($row['booking_count']),
+                    number_format($row['internal_count'] ?? 0),
+                    number_format($row['external_count'] ?? 0),
+                    number_format($row['total_attendees'] ?? 0)
+                ];
+                
+                if ($user_type_filter !== 'internal') {
+                    $row_data[] = '₱' . number_format($collected, 2);
+                }
+                
+                $data[] = $row_data;
+            }
+            
+            // Add total row only for external or all users
+            if ($user_type_filter !== 'internal' && !empty($data)) {
+                $total_row = ['Total', '', number_format($total_bookings), number_format($total_internal), number_format($total_external), number_format($total_attendees)];
+                if ($user_type_filter !== 'internal') {
+                    $total_row[] = '₱' . number_format($total_collected, 2);
+                }
+                $data[] = $total_row;
+            } elseif ($user_type_filter === 'internal' && !empty($data)) {
+                $total_row = ['Total', '', number_format($total_bookings), number_format($total_internal), number_format($total_external), number_format($total_attendees)];
+                $data[] = $total_row;
+            }
+            
+        } elseif ($report_type_param === 'status') {
+            $start_date = isset($_GET['start_date']) ? sanitize_input($_GET['start_date']) : date('Y-m-d', strtotime('-1 month'));
+            $end_date = isset($_GET['end_date']) ? sanitize_input($_GET['end_date']) : date('Y-m-d');
+            $status = isset($_GET['status']) ? sanitize_input($_GET['status']) : '';
+            
+            $title = 'Booking Status Report';
+            $headers = ['Status', 'Facility', 'Total Bookings', 'Internal', 'External', 'Number of Attendees'];
+            
+            if ($user_type_filter !== 'internal') {
+                $headers[] = 'Collected';
+            }
+            
+            $query = "SELECT b.status, 'Gymnasium' as facility_name, COUNT(*) as booking_count,
+                             COUNT(CASE WHEN u.user_type IN ('student', 'faculty', 'staff') THEN 1 END) as internal_count,
+                             COUNT(CASE WHEN u.user_type = 'external' THEN 1 END) as external_count,
+                             SUM(COALESCE(b.attendees, 0)) as total_attendees
+                      FROM bookings b 
+                      LEFT JOIN user_accounts u ON b.user_id = u.id
+                      WHERE b.facility_type = 'gym' AND b.date BETWEEN ? AND ?";
+            
+            $params = [$start_date, $end_date];
+            $types = "ss";
+            
+            if (!empty($status)) {
+                if ($status === 'approved') {
+                    $query .= " AND (b.status = 'approved' OR b.status = 'confirmed')";
+                } else {
+                    $query .= " AND b.status = ?";
+                    $params[] = $status;
+                    $types .= "s";
+                }
+            }
+            
+            if ($user_type_filter === 'internal') {
+                $query .= " AND u.user_type IN ('student', 'faculty', 'staff')";
+            } elseif ($user_type_filter === 'external') {
+                $query .= " AND u.user_type = 'external'";
+            }
+            
+            $query .= " GROUP BY b.status ORDER BY COUNT(CASE WHEN u.user_type = 'external' THEN 1 END) DESC, b.status";
+            
+            $stmt = $conn->prepare($query);
+            $stmt->bind_param($types, ...$params);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            
+            // Get collected by status
+            $collected_query = "SELECT b.status, b.additional_info
+                                FROM bookings b 
+                                LEFT JOIN user_accounts u ON b.user_id = u.id
+                                WHERE b.facility_type = 'gym' 
+                                AND b.date BETWEEN ? AND ?
+                                AND u.user_type = 'external'
+                                AND (b.status = 'confirmed' OR b.status = 'approved')
+                                AND b.or_number IS NOT NULL 
+                                AND b.or_number != ''
+                                AND b.additional_info IS NOT NULL";
+            
+            $collected_params = [$start_date, $end_date];
+            $collected_types = "ss";
+            
+            if (!empty($status)) {
+                if ($status === 'approved') {
+                    $collected_query .= " AND (b.status = 'approved' OR b.status = 'confirmed')";
+                } else {
+                    $collected_query .= " AND b.status = ?";
+                    $collected_params[] = $status;
+                    $collected_types .= "s";
+                }
+            }
+            
+            $collected_stmt = $conn->prepare($collected_query);
+            $collected_stmt->bind_param($collected_types, ...$collected_params);
+            $collected_stmt->execute();
+            $collected_result = $collected_stmt->get_result();
+            
+            $collected_by_status = [];
+            $total_collected = 0;
+            while ($collected_row = $collected_result->fetch_assoc()) {
+                if (!empty($collected_row['additional_info'])) {
+                    $additional_info = json_decode($collected_row['additional_info'], true);
+                    if (isset($additional_info['cost_breakdown']['total'])) {
+                        $status_key = $collected_row['status'];
+                        $amount = (float)$additional_info['cost_breakdown']['total'];
+                        $collected_by_status[$status_key] = ($collected_by_status[$status_key] ?? 0) + $amount;
+                        $total_collected += $amount;
+                    }
+                }
+            }
+            
+            $total_bookings = 0;
+            $total_internal = 0;
+            $total_external = 0;
+            $total_attendees = 0;
+            
+            while ($row = $result->fetch_assoc()) {
+                $status_display = ucfirst($row['status']);
+                if ($row['status'] === 'confirmed') {
+                    $status_display = 'Approved';
+                }
+                
+                $collected = $collected_by_status[$row['status']] ?? 0;
+                
+                $total_bookings += $row['booking_count'];
+                $total_internal += ($row['internal_count'] ?? 0);
+                $total_external += ($row['external_count'] ?? 0);
+                $total_attendees += (int)($row['total_attendees'] ?? 0);
+                
+                $row_data = [
+                    $status_display,
+                    $row['facility_name'],
+                    number_format($row['booking_count']),
+                    number_format($row['internal_count'] ?? 0),
+                    number_format($row['external_count'] ?? 0),
+                    number_format($row['total_attendees'] ?? 0)
+                ];
+                
+                if ($user_type_filter !== 'internal') {
+                    $row_data[] = '₱' . number_format($collected, 2);
+                }
+                
+                $data[] = $row_data;
+            }
+            
+            // Add total row only for external or all users
+            if ($user_type_filter !== 'internal' && !empty($data)) {
+                $total_row = ['Total', '', number_format($total_bookings), number_format($total_internal), number_format($total_external), number_format($total_attendees)];
+                if ($user_type_filter !== 'internal') {
+                    $total_row[] = '₱' . number_format($total_collected, 2);
+                }
+                $data[] = $total_row;
+            } elseif ($user_type_filter === 'internal' && !empty($data)) {
+                $total_row = ['Total', '', number_format($total_bookings), number_format($total_internal), number_format($total_external), number_format($total_attendees)];
+                $data[] = $total_row;
+            }
+            
+        } else {
+            // Default: detailed booking information
         $title = 'Gym Bookings Detailed Report';
         $headers = ['Booking ID', 'Status', 'Facility', 'Date', 'Time', 'Purpose', 'Attendees', 'Requested On', 'Requester Name', 'Department/Organization', 'Equipment/Services'];
         
@@ -288,7 +535,7 @@ switch ($report_type) {
         // Build query to get detailed booking information
         $query = "SELECT b.booking_id, b.status, b.date, b.start_time, b.end_time, b.purpose, b.attendees, 
                          b.created_at, b.or_number, b.additional_info,
-                         u.name as user_name, u.email as user_email, u.organization
+                             u.name as user_name, u.email as user_email, u.organization, u.user_type
                   FROM bookings b
                   LEFT JOIN user_accounts u ON b.user_id = u.id
                   WHERE b.facility_type = 'gym' AND b.date BETWEEN ? AND ?";
@@ -307,7 +554,7 @@ switch ($report_type) {
             }
         }
         
-        $query .= " ORDER BY b.date DESC, b.created_at DESC";
+            $query .= " ORDER BY CASE WHEN u.user_type = 'external' THEN 0 ELSE 1 END, b.date DESC, b.created_at DESC";
         
         $stmt = $conn->prepare($query);
         if (!empty($params)) {
@@ -374,6 +621,7 @@ switch ($report_type) {
                 $organization,
                 $equipment
             ];
+            }
         }
         break;
 }

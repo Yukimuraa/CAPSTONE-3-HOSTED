@@ -148,9 +148,9 @@ if (count($orders) === 0) {
                                     <div class="mt-2 text-sm text-blue-700">
                                         <ol class="list-decimal list-inside space-y-1">
                                             <li>Your order is now pending approval from the Business Affairs Office</li>
-                                            <li>You will be notified once your order is approved</li>
-                                            <li>After approval, proceed to the cashier for payment</li>
-                                            <li>You can view your order receipts from the Orders page</li>
+                                            <li>Once you submit request,you can go to the BAO Office to get the order of payment slip</li>
+                                            <li>Then you can go the cashier office to pay</li>
+                                            <li>Then go back the BAO Office  for approval and claim your items</li>
                                         </ol>
                                     </div>
                                 </div>

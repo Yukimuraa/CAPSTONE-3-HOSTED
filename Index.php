@@ -165,9 +165,9 @@ session_start();
                 <a href="login.php" class="px-5 py-2.5 border-2 border-blue-600 rounded-lg text-blue-600 font-semibold hover:bg-blue-50 transition-all duration-300 hover:scale-105">
                     <i class="fas fa-sign-in-alt mr-2"></i>Login
                 </a>
-                <a href="admin_login.php" class="px-5 py-2.5 border-2 border-red-600 rounded-lg text-red-600 font-semibold hover:bg-red-50 transition-all duration-300 hover:scale-105">
-                    <i class="fas fa-user-shield mr-2"></i>Admin Login
-                </a>
+                <!--<a href="admin_login.php" class="px-5 py-2.5 border-2 border-red-600 rounded-lg text-red-600 font-semibold hover:bg-red-50 transition-all duration-300 hover:scale-105">-->
+                <!--    <i class="fas fa-user-shield mr-2"></i>Admin Login-->
+                <!--</a>-->
                 <a href="register.php" class="px-5 py-2.5 bg-gradient-to-r from-blue-600 to-green-600 text-white rounded-lg font-semibold btn-modern hover:shadow-lg transition-all duration-300 hover:scale-105">
                     <i class="fas fa-user-plus mr-2"></i>Register
                 </a>

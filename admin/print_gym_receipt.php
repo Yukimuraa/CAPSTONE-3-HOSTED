@@ -62,6 +62,12 @@ $control_no = $booking_id;
 $booking_date_formatted = date('F j, Y', strtotime($booking['date']));
 $booking_time = date('g:i A', strtotime($booking['start_time'])) . ' - ' . date('g:i A', strtotime($booking['end_time']));
 
+// Format submission time (when booking was created)
+$submission_time = '';
+if (!empty($booking['created_at'])) {
+    $submission_time = date('g:i A', strtotime($booking['created_at']));
+}
+
 // Generate official receipt number
 $receipt_no = 'OR-GYM-' . date('Ymd') . '-' . substr($booking_id, -6);
 
@@ -460,7 +466,6 @@ $hours = $start->diff($end)->h + ($start->diff($end)->i / 60);
                         <div class="document-info-box">
                             <div>Document Code: F.04-BAO-CHMSU</div>
                             <div>Revision No.: 0</div>
-                            <div>Effective Date: April 7, 2025</div>
                             <div>Page: 1 of 1</div>
                         </div>
                         <div class="copy-label-top"><?php echo $copy['name']; ?></div>
@@ -480,7 +485,7 @@ $hours = $start->diff($end)->h + ($start->diff($end)->i / 60);
                         </div>
                         <div class="form-field">
                             <span class="form-label">Date:</span>
-                            <span class="form-value"><?php echo $booking_date_formatted; ?></span>
+                            <span class="form-value"><?php echo $booking_date_formatted; ?><?php if (!empty($submission_time)): ?> Time: <?php echo $submission_time; ?><?php endif; ?></span>
                         </div>
                     </div>
                     <div class="form-middle">
@@ -488,6 +493,12 @@ $hours = $start->diff($end)->h + ($start->diff($end)->i / 60);
                             <span class="form-label">Payor:</span>
                             <span class="form-value"><?php echo htmlspecialchars($booking['user_name']); ?></span>
                         </div>
+                        <?php if (!empty($booking['organization'])): ?>
+                        <div class="form-field">
+                            <span class="form-label">Organization:</span>
+                            <span class="form-value"><?php echo htmlspecialchars($booking['organization']); ?></span>
+                        </div>
+                        <?php endif; ?>
                         <div style="margin-top: 4px;">
                             <div style="font-weight: bold; font-size: 7pt; margin-bottom: 2px;">NATURE OF PAYMENT</div>
                             <div class="form-value-large">
@@ -577,7 +588,7 @@ $hours = $start->diff($end)->h + ($start->diff($end)->i / 60);
                     </div>
                     <div class="receipt-field">
                         <span class="receipt-label">Date:</span>
-                        <span class="receipt-value"><?php echo $booking_date_formatted; ?></span>
+                        <span class="receipt-value"><?php echo $booking_date_formatted; ?><?php if (!empty($submission_time)): ?> Time: <?php echo $submission_time; ?><?php endif; ?></span>
                     </div>
                     <div class="receipt-field">
                         <span class="receipt-label">Amount:</span>

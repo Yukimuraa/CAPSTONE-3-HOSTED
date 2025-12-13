@@ -31,9 +31,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
     
-    // Per-bus availability for the date range
+    // Per-bus availability for the date range (only available buses)
     $buses = [];
-    $buses_query = "SELECT b.id, b.bus_number FROM buses b ORDER BY CAST(b.bus_number AS UNSIGNED) ASC";
+    $buses_query = "SELECT b.id, b.bus_number FROM buses b WHERE b.status = 'available' ORDER BY CAST(b.bus_number AS UNSIGNED) ASC";
     $buses_result = $conn->query($buses_query);
     
     // Preload booked bus ids for the date range

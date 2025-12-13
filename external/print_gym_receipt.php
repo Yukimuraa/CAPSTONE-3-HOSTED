@@ -49,8 +49,12 @@ $control_no = $booking_id;
 $booking_date_formatted = date('F j, Y', strtotime($booking['date']));
 $booking_time = date('g:i A', strtotime($booking['start_time'])) . ' - ' . date('g:i A', strtotime($booking['end_time']));
 
-// Generate official receipt number
-$receipt_no = 'OR-GYM-' . date('Ymd') . '-' . substr($booking_id, -6);
+// Format start time for display (combine date and time)
+$start_datetime = $booking['date'] . ' ' . $booking['start_time'];
+$start_time_formatted = date('g:i A', strtotime($start_datetime));
+
+// Generate official receipt number (empty for manual entry)
+$receipt_no = '';
 
 // Calculate hours
 $start = new DateTime($booking['start_time']);
@@ -425,7 +429,6 @@ $hours = $start->diff($end)->h + ($start->diff($end)->i / 60);
                         <div class="document-info-box">
                             <div>Document Code: F.04-BAO-CHMSU</div>
                             <div>Revision No.: 0</div>
-                            <div>Effective Date: April 7, 2025</div>
                             <div>Page: 1 of 1</div>
                         </div>
                         <div class="copy-label-top"><?php echo $copy['name']; ?></div>
@@ -445,7 +448,7 @@ $hours = $start->diff($end)->h + ($start->diff($end)->i / 60);
                         </div>
                         <div class="form-field">
                             <span class="form-label">Date:</span>
-                            <span class="form-value"><?php echo $booking_date_formatted; ?></span>
+                            <span class="form-value"><?php echo $booking_date_formatted; ?> Time: <?php echo $start_time_formatted; ?></span>
                         </div>
                     </div>
                     <div class="form-middle">
@@ -542,7 +545,7 @@ $hours = $start->diff($end)->h + ($start->diff($end)->i / 60);
                     </div>
                     <div class="receipt-field">
                         <span class="receipt-label">Date:</span>
-                        <span class="receipt-value"><?php echo $booking_date_formatted; ?></span>
+                        <span class="receipt-value"><?php echo $booking_date_formatted; ?> Time: <?php echo $start_time_formatted; ?></span>
                     </div>
                     <div class="receipt-field">
                         <span class="receipt-label">Amount:</span>

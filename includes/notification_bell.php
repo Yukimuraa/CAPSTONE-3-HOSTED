@@ -48,7 +48,9 @@ $base_url = $base_url ?? '..';
                 <?php foreach ($notifications as $notification): ?>
                 <div class="notification-item p-4 border-b hover:bg-gray-50 cursor-pointer <?php echo $notification['is_read'] ? '' : 'bg-blue-50'; ?>" 
                      data-id="<?php echo $notification['id']; ?>"
-                     <?php if ($notification['link']): ?>onclick="window.location.href='<?php echo htmlspecialchars($base_url . '/' . $notification['link']); ?>'"<?php endif; ?>>
+                     <?php if ($notification['link']): ?>
+                     onclick="handleNotificationClick('<?php echo htmlspecialchars($notification['link']); ?>')"
+                     <?php endif; ?>>
                     <div class="flex items-start justify-between">
                         <div class="flex-1">
                             <div class="flex items-center gap-2 mb-1">
@@ -200,6 +202,56 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Auto-refresh notification count every 30 seconds
     setInterval(updateNotificationCount, 30000);
+    
+    // Handle notification click - properly construct the URL
+    function handleNotificationClick(link) {
+        if (!link) return;
+        
+        // Determine the correct path based on current location
+        const currentPath = window.location.pathname;
+        let targetUrl;
+        
+        // If link already starts with http:// or https://, use it as is
+        if (link.startsWith('http://') || link.startsWith('https://')) {
+            targetUrl = link;
+        } else {
+            // Remove any leading slashes
+            link = link.replace(/^\/+/, '');
+            
+            // Check if we're in student, external, or admin folder
+            if (currentPath.includes('/student/')) {
+                // If link starts with 'student/', remove it since we're already in student folder
+                if (link.startsWith('student/')) {
+                    link = link.replace(/^student\//, '');
+                    targetUrl = link; // Use relative path since we're already in student folder
+                } else {
+                    targetUrl = baseUrl + '/' + link;
+                }
+            } else if (currentPath.includes('/external/')) {
+                // If link starts with 'external/', remove it since we're already in external folder
+                if (link.startsWith('external/')) {
+                    link = link.replace(/^external\//, '');
+                    targetUrl = link; // Use relative path since we're already in external folder
+                } else {
+                    targetUrl = baseUrl + '/' + link;
+                }
+            } else if (currentPath.includes('/admin/')) {
+                // If link starts with 'admin/', remove it since we're already in admin folder
+                if (link.startsWith('admin/')) {
+                    link = link.replace(/^admin\//, '');
+                    targetUrl = link; // Use relative path since we're already in admin folder
+                } else {
+                    targetUrl = baseUrl + '/' + link;
+                }
+            } else {
+                // Root level - use the link as is with base_url
+                targetUrl = baseUrl + '/' + link;
+            }
+        }
+        
+        // Navigate to the target URL
+        window.location.href = targetUrl;
+    }
 });
 </script>
 

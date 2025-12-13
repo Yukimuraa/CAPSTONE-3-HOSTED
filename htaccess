@@ -1,0 +1,21 @@
+RewriteEngine On
+
+# 1. EXPLICITLY SET index.php AS THE DIRECTORY INDEX
+DirectoryIndex index.php
+
+# 2. DISABLE DIRECTORY LISTING
+Options -Indexes
+Options +FollowSymLinks
+
+# 3. FORCE HTTPS FIRST (before other rules)
+RewriteCond %{HTTPS} off
+RewriteRule ^(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]
+
+# 4. FORCE ROOT TO USE index.php (even if it exists)
+# This ensures / always goes to index.php
+RewriteRule ^$ index.php [L]
+
+# 5. FALLBACK TO index.php FOR ALL OTHER REQUESTS
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ index.php?url=$1 [QSA,L]

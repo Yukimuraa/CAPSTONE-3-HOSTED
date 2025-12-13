@@ -233,11 +233,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                  </div>
              </div>
 
-             <div class="mb-6 flex items-center">
-                 <input type="checkbox" id="remember" name="remember" class="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded">
-                 <label for="remember" class="ml-2 block text-sm text-gray-700">Remember me</label>
-             </div>
-
             <button type="submit" class="w-full admin-login-btn text-white py-3 px-4 rounded-lg font-semibold focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2">
                 <i class="fas fa-sign-in-alt mr-2"></i>Login
             </button>
