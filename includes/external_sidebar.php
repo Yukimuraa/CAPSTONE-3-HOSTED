@@ -31,6 +31,9 @@ $logout_path .= 'logout.php?user_type=external';
         <a href="gym.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-amber-700" onclick="handleGymReservationClick(event);">
             <i class="fas fa-calendar-alt mr-2"></i>Gym Reservation
         </a>
+        <a href="oval.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-amber-700">
+            <i class="fas fa-running mr-2"></i>Oval Field Reservation
+        </a>
         <a href="profile.php" class="block py-2.5 px-4 rounded transition duration-200 hover:bg-amber-700">
             <i class="fas fa-user mr-2"></i>My Profile
         </a>

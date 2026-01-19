@@ -3,17 +3,18 @@ session_start();
 require_once '../config/database.php';
 require_once '../includes/functions.php';
 
-// Check if user is admin
-require_admin();
-
 // Set JSON header
 header('Content-Type: application/json');
 
 // Simple error handling
 try {
+    // Check if user is external (but don't fail if not)
+    if (!isset($_SESSION['user_type']) || $_SESSION['user_type'] !== 'external') {
+        // For now, allow access - you can add proper auth later
+    }
+
     $date = sanitize_input($_GET['date'] ?? '');
     $facility_id = intval($_GET['facility_id'] ?? 1);
-    $exclude_booking_id = sanitize_input($_GET['exclude_booking_id'] ?? '');
 
     if (empty($date)) {
         echo json_encode(['error' => 'Date is required']);
@@ -27,11 +28,12 @@ try {
         exit();
     }
 
-    // Check if the date is blocked by a school event
+    // Check if the date is blocked by a school event for external users
     $blocked_query = "SELECT event_name, event_type, blocked_for_user_types, description 
                       FROM gym_blocked_dates 
                       WHERE ? BETWEEN start_date AND end_date 
-                      AND is_active = 1";
+                      AND is_active = 1
+                      AND (blocked_for_user_types = 'all' OR blocked_for_user_types = 'external')";
     $blocked_stmt = $conn->prepare($blocked_query);
     $blocked_stmt->bind_param("s", $date);
     $blocked_stmt->execute();
@@ -44,21 +46,47 @@ try {
         $blocked_info = $blocked_result->fetch_assoc();
     }
     
-    // If date is blocked, return immediately with no available sessions
-    if ($is_blocked) {
+    // Check if month is allowed for external users
+    $booking_month = (int)$date_obj->format('n');
+    $month_allowed = true;
+    $allowed_months_list = [];
+    
+    $rules_check = $conn->query("SELECT allowed_months, is_active FROM gym_booking_rules WHERE user_type = 'external' AND is_active = 1 LIMIT 1");
+    if ($rules_check && $rules_check->num_rows > 0) {
+        $rules = $rules_check->fetch_assoc();
+        $allowed_months_list = array_map('intval', explode(',', $rules['allowed_months']));
+        if (!in_array($booking_month, $allowed_months_list)) {
+            $month_allowed = false;
+        }
+    }
+    
+    // If date is blocked or month not allowed, return immediately with no available sessions
+    if ($is_blocked || !$month_allowed) {
+        $month_names = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+        $allowed_month_names = array_map(function($m) use ($month_names) { return $month_names[$m]; }, $allowed_months_list);
+        
+        $message = '';
+        if ($is_blocked) {
+            $message = 'This date is blocked due to: ' . $blocked_info['event_name'];
+        } elseif (!$month_allowed) {
+            $message = 'External users can only book during: ' . implode(', ', $allowed_month_names);
+        }
+        
         echo json_encode([
             'date' => $date,
             'sessions' => [],
             'booked' => [],
             'operating_hours' => '8:00 AM - 6:00 PM',
-            'is_blocked' => true,
+            'is_blocked' => $is_blocked,
             'blocked_info' => $blocked_info,
-            'message' => 'This date is blocked due to: ' . $blocked_info['event_name']
+            'month_allowed' => $month_allowed,
+            'allowed_months' => $allowed_month_names,
+            'message' => $message
         ]);
         exit();
     }
-    
-    // Define gym operating hours (8 AM to 6 PM)
+
+    // Define gym operating hours (8 AM to 12 PM in 2-hour sessions, then 1 PM to 6 PM)
     $operating_hours = [
         ['start' => '08:00:00', 'end' => '18:00:00', 'label' => 'Whole Day Booking (8:00 AM - 6:00 PM)', 'type' => 'whole_day'],
         ['start' => '08:00:00', 'end' => '10:00:00', 'label' => 'Morning Session (8:00 AM - 10:00 AM)', 'type' => 'session'],
@@ -68,22 +96,17 @@ try {
         ['start' => '17:00:00', 'end' => '18:00:00', 'label' => 'Evening Session (5:00 PM - 6:00 PM)', 'type' => 'session']
     ];
 
-    // Get existing bookings for the date (exclude current booking if rescheduling)
+
+    // Get existing bookings for the date
+    // Include rescheduled bookings as they are still active reservations
+    // Exclude cancelled and rejected bookings
     $bookings_query = "SELECT start_time, end_time, status FROM bookings 
-                       WHERE facility_type = 'gym' AND date = ? AND status IN ('pending', 'confirmed', 'approved')";
-    
-    if (!empty($exclude_booking_id)) {
-        $bookings_query .= " AND booking_id != ?";
-    }
-    
+                       WHERE facility_type = 'oval' 
+                       AND date = ? 
+                       AND status IN ('pending', 'confirmed', 'rescheduled', 'approved')
+                       AND status NOT IN ('cancelled', 'canceled', 'rejected')";
     $bookings_stmt = $conn->prepare($bookings_query);
-    
-    if (!empty($exclude_booking_id)) {
-        $bookings_stmt->bind_param("ss", $date, $exclude_booking_id);
-    } else {
-        $bookings_stmt->bind_param("s", $date);
-    }
-    
+    $bookings_stmt->bind_param("s", $date);
     $bookings_stmt->execute();
     $bookings_result = $bookings_stmt->get_result();
 
@@ -138,13 +161,18 @@ try {
         ];
     }
 
+    $month_names = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    $allowed_month_names = array_map(function($m) use ($month_names) { return $month_names[$m]; }, $allowed_months_list);
+    
     echo json_encode([
         'date' => $date,
         'sessions' => $sessions,
         'booked' => $booked_display,
         'operating_hours' => '8:00 AM - 6:00 PM',
         'is_blocked' => $is_blocked,
-        'blocked_info' => $blocked_info
+        'blocked_info' => $blocked_info,
+        'month_allowed' => $month_allowed,
+        'allowed_months' => $allowed_month_names
     ]);
 
 } catch (Exception $e) {

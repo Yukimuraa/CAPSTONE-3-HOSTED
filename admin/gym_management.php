@@ -213,6 +213,103 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         
+        // Reschedule booking
+        elseif ($_POST['action'] === 'reschedule' && isset($_POST['booking_id'])) {
+            $booking_id = sanitize_input($_POST['booking_id']);
+            $new_date = sanitize_input($_POST['new_date']);
+            $new_start_time = sanitize_input($_POST['new_start_time']);
+            $new_end_time = sanitize_input($_POST['new_end_time']);
+            $reschedule_reason = sanitize_input($_POST['reschedule_reason'] ?? '');
+            
+            // Validate inputs
+            if (empty($new_date) || empty($new_start_time) || empty($new_end_time)) {
+                $_SESSION['error'] = "Please fill in all required fields (date, start time, and end time).";
+            } elseif ($new_start_time >= $new_end_time) {
+                $_SESSION['error'] = "End time must be after start time.";
+            } else {
+                // Check if booking exists
+                $check_stmt = $conn->prepare("SELECT * FROM bookings WHERE booking_id = ? AND facility_type = 'gym'");
+                $check_stmt->bind_param("s", $booking_id);
+                $check_stmt->execute();
+                $check_result = $check_stmt->get_result();
+                
+                if ($check_result->num_rows > 0) {
+                    $booking = $check_result->fetch_assoc();
+                    
+                    // Check if new date/time slot is available (exclude current booking)
+                    $availability_check = $conn->prepare("SELECT * FROM bookings 
+                        WHERE facility_type = 'gym' 
+                        AND date = ? 
+                        AND booking_id != ? 
+                        AND status IN ('pending', 'confirmed', 'approved') 
+                        AND ((start_time <= ? AND end_time > ?) 
+                        OR (start_time < ? AND end_time >= ?) 
+                        OR (start_time >= ? AND end_time <= ?))");
+                    $availability_check->bind_param("ssssssss", $new_date, $booking_id, $new_start_time, $new_start_time, $new_end_time, $new_end_time, $new_start_time, $new_end_time);
+                    $availability_check->execute();
+                    $availability_result = $availability_check->get_result();
+                    
+                    if ($availability_result->num_rows > 0) {
+                        $_SESSION['error'] = "The selected date and time slot is already booked. Please choose another time.";
+                    } else {
+                        // Check if date is blocked by school event
+                        $blocked_check = $conn->prepare("SELECT * FROM gym_blocked_dates 
+                            WHERE ? BETWEEN start_date AND end_date 
+                            AND is_active = 1");
+                        $blocked_check->bind_param("s", $new_date);
+                        $blocked_check->execute();
+                        $blocked_result = $blocked_check->get_result();
+                        
+                        if ($blocked_result->num_rows > 0) {
+                            $_SESSION['error'] = "The selected date is blocked due to a school event. Please choose another date.";
+                        } else {
+                            // Update booking with new date and time
+                            $update_stmt = $conn->prepare("UPDATE bookings 
+                                SET date = ?, start_time = ?, end_time = ?, 
+                                additional_info = JSON_SET(COALESCE(additional_info, '{}'), '$.reschedule_reason', ?, '$.rescheduled_by_admin', 1, '$.rescheduled_at', NOW()),
+                                updated_at = NOW() 
+                                WHERE booking_id = ? AND facility_type = 'gym'");
+                            $update_stmt->bind_param("sssss", $new_date, $new_start_time, $new_end_time, $reschedule_reason, $booking_id);
+                            
+                            if ($update_stmt->execute()) {
+                                $_SESSION['success'] = "Reservation has been rescheduled successfully.";
+                                
+                                // Send notification to user
+                                require_once '../includes/notification_functions.php';
+                                $booking_user_id = $booking['user_id'];
+                                $date_formatted = date('F j, Y', strtotime($new_date));
+                                $old_date_formatted = date('F j, Y', strtotime($booking['date']));
+                                
+                                // Determine correct link based on user type
+                                $get_user_type_link = $conn->prepare("SELECT u.user_type FROM bookings b JOIN user_accounts u ON b.user_id = u.id WHERE b.booking_id = ?");
+                                $get_user_type_link->bind_param("s", $booking_id);
+                                $get_user_type_link->execute();
+                                $user_type_link_result = $get_user_type_link->get_result();
+                                $notification_link = "student/gym.php"; // Default for students
+                                if ($user_type_link_result->num_rows > 0) {
+                                    $user_type_for_link = $user_type_link_result->fetch_assoc()['user_type'];
+                                    if ($user_type_for_link === 'external') {
+                                        $notification_link = "external/gym.php";
+                                    } elseif ($user_type_for_link === 'student') {
+                                        $notification_link = "student/gym.php";
+                                    } elseif ($user_type_for_link === 'faculty' || $user_type_for_link === 'staff') {
+                                        $notification_link = "faculty/gym.php";
+                                    }
+                                }
+                                
+                                $reason_text = !empty($reschedule_reason) ? " Reason: {$reschedule_reason}" : "";
+                                create_notification($booking_user_id, "Gym Reservation Rescheduled", "Your gym reservation (ID: {$booking_id}) has been rescheduled from {$old_date_formatted} to {$date_formatted}.{$reason_text}", "info", $notification_link);
+                            } else {
+                                $_SESSION['error'] = "Error rescheduling reservation: " . $conn->error;
+                            }
+                        }
+                    }
+                } else {
+                    $_SESSION['error'] = "Reservation not found.";
+                }
+            }
+        }
+        
         // Add new facility
         elseif ($_POST['action'] === 'add_facility') {
             $facility_name = sanitize_input($_POST['facility_name']);
@@ -898,6 +995,18 @@ if (empty($pricing_settings)) {
                                                                 <i class="fas fa-times mr-1.5"></i>Reject
                                                             </button>
                                                         <?php endif; ?>
+                                                        
+                                                        <?php if (in_array($request['status'], ['pending', 'confirmed', 'approved'])): ?>
+                                                            <button type="button" class="inline-flex items-center px-3 py-1.5 border border-blue-300 shadow-sm text-sm font-medium rounded-md text-blue-700 bg-blue-50 hover:bg-blue-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500" onclick="openRescheduleModal(<?php echo htmlspecialchars(json_encode([
+                                                                'booking_id' => $request['booking_id'],
+                                                                'date' => $request['date'],
+                                                                'start_time' => $request['start_time'],
+                                                                'end_time' => $request['end_time'],
+                                                                'user_name' => $request['user_name']
+                                                            ])); ?>)">
+                                                                <i class="fas fa-calendar-alt mr-1.5"></i>Reschedule
+                                                            </button>
+                                                        <?php endif; ?>
                                                     </div>
                                                 </td>
                                             </tr>
@@ -1416,6 +1525,114 @@ if (empty($pricing_settings)) {
                 </button>
             </div>
         </form>
+    </div>
+</div>
+
+<!-- Reschedule Modal -->
+<div id="rescheduleModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden z-50 overflow-y-auto">
+    <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-4xl my-8">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-medium text-gray-900">Reschedule Booking</h3>
+            <button type="button" class="text-gray-400 hover:text-gray-500" onclick="closeRescheduleModal()">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <!-- Left Column: Form -->
+            <div>
+                <form method="POST" action="gym_management.php" id="rescheduleForm">
+                    <input type="hidden" name="action" value="reschedule">
+                    <input type="hidden" id="reschedule_booking_id" name="booking_id">
+                    
+                    <div class="mb-4">
+                        <p class="text-sm text-gray-600 mb-3">
+                            <strong>Current Booking:</strong><br>
+                            <span id="reschedule_current_info"></span>
+                        </p>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label for="reschedule_new_date" class="block text-sm font-medium text-gray-700 mb-1">New Date <span class="text-red-500">*</span></label>
+                        <input type="date" id="reschedule_new_date" name="new_date" required min="<?php echo date('Y-m-d'); ?>" class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50">
+                        <p class="mt-1 text-xs text-gray-500">Select a date to see available time slots</p>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label for="reschedule_new_start_time" class="block text-sm font-medium text-gray-700 mb-1">New Start Time <span class="text-red-500">*</span></label>
+                        <input type="time" id="reschedule_new_start_time" name="new_start_time" required class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50">
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label for="reschedule_new_end_time" class="block text-sm font-medium text-gray-700 mb-1">New End Time <span class="text-red-500">*</span></label>
+                        <input type="time" id="reschedule_new_end_time" name="new_end_time" required class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50">
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label for="reschedule_reason" class="block text-sm font-medium text-gray-700 mb-1">Reason for Rescheduling (Optional)</label>
+                        <textarea id="reschedule_reason" name="reschedule_reason" rows="3" class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50" placeholder="Explain why this booking is being rescheduled"></textarea>
+                        <p class="mt-1 text-xs text-gray-500">This reason will be sent to the user via notification.</p>
+                    </div>
+                    
+                    <div class="flex justify-end">
+                        <button type="button" class="bg-gray-200 text-gray-700 py-2 px-4 rounded-md mr-2 hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2" onclick="closeRescheduleModal()">
+                            Cancel
+                        </button>
+                        <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                            <i class="fas fa-calendar-alt mr-1.5"></i>Reschedule Booking
+                        </button>
+                    </div>
+                </form>
+            </div>
+            
+            <!-- Right Column: Availability Display -->
+            <div>
+                <div class="mb-4">
+                    <h4 class="text-md font-semibold text-gray-900 mb-2">
+                        <i class="fas fa-calendar-check mr-2"></i>Availability for Selected Date
+                    </h4>
+                    <p class="text-xs text-gray-500 mb-3">Click on an available time slot to auto-fill the time fields</p>
+                </div>
+                
+                <!-- Loading indicator -->
+                <div id="reschedule_availability_loading" class="hidden text-center py-4">
+                    <div class="inline-block h-6 w-6 border-2 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
+                    <p class="mt-2 text-sm text-gray-600">Loading availability...</p>
+                </div>
+                
+                <!-- Availability content -->
+                <div id="reschedule_availability_content" class="hidden">
+                    <!-- Blocked date message -->
+                    <div id="reschedule_blocked_message" class="hidden p-4 bg-red-50 border-2 border-red-300 rounded-lg mb-4">
+                        <div class="text-center">
+                            <div class="text-3xl mb-2" id="reschedule_blocked_icon">🚫</div>
+                            <div class="font-bold text-red-600 mb-1">DATE BLOCKED</div>
+                            <div class="font-semibold text-gray-800" id="reschedule_blocked_event"></div>
+                            <div class="text-sm text-gray-600 mt-1" id="reschedule_blocked_desc"></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Available sessions -->
+                    <div id="reschedule_available_sessions" class="space-y-2 mb-4">
+                        <h5 class="text-sm font-semibold text-gray-700 mb-2">Available Time Slots:</h5>
+                        <div id="reschedule_sessions_list" class="space-y-2"></div>
+                    </div>
+                    
+                    <!-- Booked slots -->
+                    <div id="reschedule_booked_slots" class="mt-4">
+                        <h5 class="text-sm font-semibold text-gray-700 mb-2">Booked Time Slots:</h5>
+                        <div id="reschedule_booked_list" class="space-y-1"></div>
+                        <p id="reschedule_no_bookings" class="text-sm text-gray-500 hidden">No bookings for this date</p>
+                    </div>
+                </div>
+                
+                <!-- No date selected message -->
+                <div id="reschedule_no_date_message" class="text-center py-8 text-gray-500">
+                    <i class="fas fa-calendar-alt text-4xl mb-3 text-gray-300"></i>
+                    <p class="text-sm">Please select a date to view availability</p>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -2039,6 +2256,251 @@ if (empty($pricing_settings)) {
     function closeRejectModal() {
         document.getElementById('rejectModal').classList.add('hidden');
     }
+    
+    // Reschedule modal functions
+    // Store current booking ID for availability check
+    let currentRescheduleBookingId = '';
+    
+    function openRescheduleModal(booking) {
+        currentRescheduleBookingId = booking.booking_id;
+        document.getElementById('reschedule_booking_id').value = booking.booking_id;
+        
+        // Format current booking info
+        const currentDate = new Date(booking.date);
+        const formattedDate = currentDate.toLocaleDateString('en-US', { 
+            weekday: 'long', 
+            year: 'numeric', 
+            month: 'long', 
+            day: 'numeric' 
+        });
+        const startTime = formatTime(booking.start_time);
+        const endTime = formatTime(booking.end_time);
+        
+        document.getElementById('reschedule_current_info').textContent = 
+            `${formattedDate} from ${startTime} to ${endTime} (${booking.user_name})`;
+        
+        // Set default values to current booking
+        document.getElementById('reschedule_new_date').value = booking.date;
+        document.getElementById('reschedule_new_start_time').value = booking.start_time.substring(0, 5);
+        document.getElementById('reschedule_new_end_time').value = booking.end_time.substring(0, 5);
+        document.getElementById('reschedule_reason').value = '';
+        
+        // Set minimum date to today
+        document.getElementById('reschedule_new_date').min = new Date().toISOString().split('T')[0];
+        
+        // Reset availability display
+        resetRescheduleAvailability();
+        
+        // Load availability for current date
+        if (booking.date) {
+            loadRescheduleAvailability(booking.date);
+        }
+        
+        document.getElementById('rescheduleModal').classList.remove('hidden');
+    }
+    
+    function closeRescheduleModal() {
+        document.getElementById('rescheduleModal').classList.add('hidden');
+        // Reset form
+        document.getElementById('rescheduleForm').reset();
+        resetRescheduleAvailability();
+        currentRescheduleBookingId = '';
+    }
+    
+    // Reset availability display
+    function resetRescheduleAvailability() {
+        document.getElementById('reschedule_availability_loading').classList.add('hidden');
+        document.getElementById('reschedule_availability_content').classList.add('hidden');
+        document.getElementById('reschedule_no_date_message').classList.remove('hidden');
+        document.getElementById('reschedule_blocked_message').classList.add('hidden');
+        document.getElementById('reschedule_sessions_list').innerHTML = '';
+        document.getElementById('reschedule_booked_list').innerHTML = '';
+    }
+    
+    // Load availability for selected date
+    function loadRescheduleAvailability(date) {
+        if (!date) {
+            resetRescheduleAvailability();
+            return;
+        }
+        
+        // Show loading
+        document.getElementById('reschedule_availability_loading').classList.remove('hidden');
+        document.getElementById('reschedule_availability_content').classList.add('hidden');
+        document.getElementById('reschedule_no_date_message').classList.add('hidden');
+        
+        // Build URL with booking_id to exclude current booking
+        const url = `get_gym_availability.php?date=${encodeURIComponent(date)}${currentRescheduleBookingId ? '&exclude_booking_id=' + encodeURIComponent(currentRescheduleBookingId) : ''}`;
+        
+        fetch(url)
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('reschedule_availability_loading').classList.add('hidden');
+                document.getElementById('reschedule_availability_content').classList.remove('hidden');
+                
+                // Check if date is blocked
+                if (data.is_blocked) {
+                    document.getElementById('reschedule_blocked_message').classList.remove('hidden');
+                    const eventIcon = data.blocked_info?.event_type === 'ceremony' ? '🎓' : 
+                                     data.blocked_info?.event_type === 'intramurals' ? '🏅' : '🚫';
+                    document.getElementById('reschedule_blocked_icon').textContent = eventIcon;
+                    document.getElementById('reschedule_blocked_event').textContent = data.blocked_info?.event_name || 'School Event';
+                    document.getElementById('reschedule_blocked_desc').textContent = data.message || '';
+                    document.getElementById('reschedule_available_sessions').classList.add('hidden');
+                    document.getElementById('reschedule_booked_slots').classList.add('hidden');
+                    return;
+                } else {
+                    document.getElementById('reschedule_blocked_message').classList.add('hidden');
+                    document.getElementById('reschedule_available_sessions').classList.remove('hidden');
+                    document.getElementById('reschedule_booked_slots').classList.remove('hidden');
+                }
+                
+                // Display available sessions
+                const sessionsList = document.getElementById('reschedule_sessions_list');
+                sessionsList.innerHTML = '';
+                
+                if (data.sessions && data.sessions.length > 0) {
+                    data.sessions.forEach(session => {
+                        if (session.available && session.type !== 'whole_day') {
+                            const sessionDiv = document.createElement('div');
+                            sessionDiv.className = 'p-2 border border-green-300 rounded-md bg-green-50 hover:bg-green-100 cursor-pointer transition-colors';
+                            sessionDiv.onclick = () => selectRescheduleTimeSlot(session.start, session.end);
+                            
+                            const timeText = formatTimeSlot(session.start, session.end);
+                            sessionDiv.innerHTML = `
+                                <div class="flex items-center justify-between">
+                                    <div>
+                                        <div class="text-sm font-medium text-green-800">${session.label}</div>
+                                        <div class="text-xs text-green-600">${timeText}</div>
+                                    </div>
+                                    <i class="fas fa-check-circle text-green-600"></i>
+                                </div>
+                            `;
+                            sessionsList.appendChild(sessionDiv);
+                        }
+                    });
+                    
+                    if (sessionsList.children.length === 0) {
+                        sessionsList.innerHTML = '<p class="text-sm text-gray-500">No available time slots for this date</p>';
+                    }
+                } else {
+                    sessionsList.innerHTML = '<p class="text-sm text-gray-500">No available time slots for this date</p>';
+                }
+                
+                // Display booked slots
+                const bookedList = document.getElementById('reschedule_booked_list');
+                bookedList.innerHTML = '';
+                
+                if (data.booked && data.booked.length > 0) {
+                    document.getElementById('reschedule_no_bookings').classList.add('hidden');
+                    data.booked.forEach(booked => {
+                        // Skip lunch break (12:00-13:00) as it's not a real booking
+                        if (booked.start === '12:00:00' && booked.end === '13:00:00') {
+                            return;
+                        }
+                        
+                        const bookedDiv = document.createElement('div');
+                        bookedDiv.className = 'p-2 border border-red-200 rounded-md bg-red-50';
+                        const timeText = formatTimeSlot(booked.start, booked.end);
+                        bookedDiv.innerHTML = `
+                            <div class="text-sm text-red-800">
+                                <i class="fas fa-times-circle mr-1"></i>${timeText}
+                            </div>
+                        `;
+                        bookedList.appendChild(bookedDiv);
+                    });
+                } else {
+                    document.getElementById('reschedule_no_bookings').classList.remove('hidden');
+                }
+            })
+            .catch(error => {
+                console.error('Error loading availability:', error);
+                document.getElementById('reschedule_availability_loading').classList.add('hidden');
+                document.getElementById('reschedule_availability_content').innerHTML = 
+                    '<p class="text-sm text-red-600">Error loading availability. Please try again.</p>';
+            });
+    }
+    
+    // Select time slot from availability
+    function selectRescheduleTimeSlot(startTime, endTime) {
+        document.getElementById('reschedule_new_start_time').value = startTime.substring(0, 5);
+        document.getElementById('reschedule_new_end_time').value = endTime.substring(0, 5);
+        
+        // Highlight selected slot
+        const sessions = document.querySelectorAll('#reschedule_sessions_list > div');
+        sessions.forEach(session => {
+            session.classList.remove('ring-2', 'ring-blue-500');
+            const timeText = session.textContent;
+            if (timeText.includes(startTime.substring(0, 5)) && timeText.includes(endTime.substring(0, 5))) {
+                session.classList.add('ring-2', 'ring-blue-500');
+            }
+        });
+    }
+    
+    // Format time slot for display
+    function formatTimeSlot(start, end) {
+        const startFormatted = formatTime(start);
+        const endFormatted = formatTime(end);
+        return `${startFormatted} - ${endFormatted}`;
+    }
+    
+    // Add event listener for date change
+    document.addEventListener('DOMContentLoaded', function() {
+        const dateInput = document.getElementById('reschedule_new_date');
+        if (dateInput) {
+            dateInput.addEventListener('change', function() {
+                const selectedDate = this.value;
+                if (selectedDate) {
+                    loadRescheduleAvailability(selectedDate);
+                } else {
+                    resetRescheduleAvailability();
+                }
+            });
+        }
+    });
+    
+    // Helper function to format time
+    function formatTime(timeString) {
+        if (!timeString) return '';
+        const [hours, minutes] = timeString.split(':');
+        const date = new Date();
+        date.setHours(parseInt(hours));
+        date.setMinutes(parseInt(minutes));
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+    
+    // Validate reschedule form
+    document.getElementById('rescheduleForm')?.addEventListener('submit', function(e) {
+        const newDate = document.getElementById('reschedule_new_date').value;
+        const newStartTime = document.getElementById('reschedule_new_start_time').value;
+        const newEndTime = document.getElementById('reschedule_new_end_time').value;
+        
+        if (!newDate || !newStartTime || !newEndTime) {
+            e.preventDefault();
+            alert('Please fill in all required fields.');
+            return false;
+        }
+        
+        if (newStartTime >= newEndTime) {
+            e.preventDefault();
+            alert('End time must be after start time.');
+            return false;
+        }
+        
+        // Check if date is in the past
+        const selectedDate = new Date(newDate);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        selectedDate.setHours(0, 0, 0, 0);
+        
+        if (selectedDate < today) {
+            e.preventDefault();
+            alert('Cannot reschedule to a past date.');
+            return false;
+        }
+        
+        return true;
+    });
     
     // Add facility modal functions
     function openAddFacilityModal() {

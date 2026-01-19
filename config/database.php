@@ -1,5 +1,8 @@
 <?php
 // Database configuration
+// $db_host = 'localhost';
+// $db_user = 'u167754267_bao_db';
+// $db_pass = 'Vo57?@g&4';
 $db_host = 'localhost';
 $db_user = 'root';
 $db_pass = '';

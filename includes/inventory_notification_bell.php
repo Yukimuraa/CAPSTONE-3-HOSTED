@@ -110,6 +110,40 @@ document.addEventListener('DOMContentLoaded', function() {
     const closeBtn = document.getElementById('close-notifications');
     const baseUrl = '<?php echo $base_url; ?>';
     
+    // Play notification sound using the audio file
+    function playNotificationSound() {
+        try {
+            // Construct the sound file path
+            const soundPath = baseUrl + '/assets/sound/new-notification-09-352705.mp3';
+            const audio = new Audio(soundPath);
+            audio.volume = 0.7; // Set volume to 70%
+            
+            // Add error handler for debugging
+            audio.addEventListener('error', function(e) {
+                console.error('Error loading notification sound:', e);
+                console.error('Sound path attempted:', soundPath);
+            });
+            
+            // Play the sound
+            const playPromise = audio.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(e => {
+                    console.log('Could not play notification sound (autoplay prevented):', e);
+                    // Try to play again after user interaction
+                    document.addEventListener('click', function playOnce() {
+                        audio.play().catch(err => console.log('Still could not play:', err));
+                        document.removeEventListener('click', playOnce);
+                    }, { once: true });
+                });
+            }
+        } catch (e) {
+            console.log('Could not play notification sound:', e);
+        }
+    }
+    
+    // Store previous notification count to detect new notifications
+    let previousCount = <?php echo $unread_count; ?>;
+    
     // Debug logging
     console.log('Notification bell initialized', { bell: !!bell, dropdown: !!dropdown });
     
@@ -323,6 +357,15 @@ document.addEventListener('DOMContentLoaded', function() {
                     !n.is_read
                 ).length;
                 
+                // Play sound if there's a new notification (count increased)
+                if (lowStockUnread > previousCount && previousCount >= 0) {
+                    console.log('New low stock notification detected! Count increased from', previousCount, 'to', lowStockUnread);
+                    playNotificationSound();
+                }
+                
+                // Update previous count
+                previousCount = lowStockUnread;
+                
                 if (!bell) return;
                 const badge = bell.querySelector('span');
                 if (lowStockUnread > 0) {
@@ -337,11 +380,36 @@ document.addEventListener('DOMContentLoaded', function() {
                 } else if (badge) {
                     badge.remove();
                 }
+            })
+            .catch(error => {
+                console.error('Error updating notification count:', error);
             });
     }
     
-    // Auto-refresh notification count every 30 seconds
-    setInterval(updateNotificationCount, 30000);
+    // Auto-refresh notification count every 2 seconds for very fast response
+    setInterval(updateNotificationCount, 2000);
+    
+    // Check immediately when page becomes visible (user switches back to tab)
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) {
+            updateNotificationCount();
+        }
+    });
+    
+    // Check immediately when window regains focus
+    window.addEventListener('focus', function() {
+        updateNotificationCount();
+    });
+    
+    // Check immediately on page load
+    updateNotificationCount();
+    
+    // Also check when mouse moves (user is active on page)
+    let mouseMoveTimeout;
+    document.addEventListener('mousemove', function() {
+        clearTimeout(mouseMoveTimeout);
+        mouseMoveTimeout = setTimeout(updateNotificationCount, 1000);
+    });
 });
 </script>
 

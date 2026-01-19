@@ -50,6 +50,68 @@ if (isset($_POST['action']) && $_POST['action'] === 'cancel' && isset($_POST['bo
     exit();
 }
 
+// Handle booking reschedule
+if (isset($_POST['action']) && $_POST['action'] === 'reschedule' && isset($_POST['booking_id'])) {
+    $booking_id = (int)$_POST['booking_id'];
+    $new_date = sanitize_input($_POST['new_date']);
+    $new_start_time = sanitize_input($_POST['new_start_time']);
+    $new_end_time = sanitize_input($_POST['new_end_time']);
+    
+    // Validate dates
+    if (empty($new_date) || empty($new_start_time) || empty($new_end_time)) {
+        $_SESSION['error'] = "Please fill in all required fields.";
+        header("Location: gym_bookings.php");
+        exit();
+    }
+    
+    // Check if the booking belongs to the user and is in a reschedulable state
+    $check_stmt = $conn->prepare("SELECT * FROM bookings WHERE id = ? AND user_id = ? AND status IN ('pending', 'confirmed') AND date >= CURDATE() AND facility_type = 'gym'");
+    $check_stmt->bind_param("ii", $booking_id, $user_id);
+    $check_stmt->execute();
+    $check_result = $check_stmt->get_result();
+    
+    if ($check_result->num_rows > 0) {
+        $booking = $check_result->fetch_assoc();
+        $facility_id = $booking['facility_id'];
+        
+        // Check if new date/time slot is available
+        $availability_check = $conn->prepare("SELECT * FROM bookings WHERE facility_id = ? AND date = ? AND id != ? AND status IN ('pending', 'confirmed') AND ((start_time <= ? AND end_time > ?) OR (start_time < ? AND end_time >= ?) OR (start_time >= ? AND end_time <= ?))");
+        $availability_check->bind_param("isisssssss", $facility_id, $new_date, $booking_id, $new_start_time, $new_start_time, $new_end_time, $new_end_time, $new_start_time, $new_end_time);
+        $availability_check->execute();
+        $availability_result = $availability_check->get_result();
+        
+        if ($availability_result->num_rows > 0) {
+            $_SESSION['error'] = "The selected date and time slot is already booked. Please choose another time.";
+        } else {
+            // Check if date is blocked by school event
+            $blocked_check = $conn->prepare("SELECT * FROM gym_blocked_dates WHERE ? BETWEEN start_date AND end_date AND is_active = 1 AND (blocked_for_user_types = 'all' OR blocked_for_user_types = 'external')");
+            $blocked_check->bind_param("s", $new_date);
+            $blocked_check->execute();
+            $blocked_result = $blocked_check->get_result();
+            
+            if ($blocked_result->num_rows > 0) {
+                $_SESSION['error'] = "The selected date is blocked due to a school event. Please choose another date.";
+            } else {
+                // Update booking
+                $update_stmt = $conn->prepare("UPDATE bookings SET date = ?, start_time = ?, end_time = ?, status = 'pending', updated_at = NOW() WHERE id = ?");
+                $update_stmt->bind_param("sssi", $new_date, $new_start_time, $new_end_time, $booking_id);
+                
+                if ($update_stmt->execute()) {
+                    $_SESSION['success'] = "Your reservation has been rescheduled successfully. It will need to be re-approved by the admin.";
+                } else {
+                    $_SESSION['error'] = "Error rescheduling reservation: " . $conn->error;
+                }
+            }
+        }
+    } else {
+        $_SESSION['error'] = "Invalid reservation or you cannot reschedule this reservation.";
+    }
+    
+    // Redirect to prevent form resubmission
+    header("Location: gym_bookings.php");
+    exit();
+}
+
 // Get filter parameters
 $status_filter = isset($_GET['status']) ? sanitize_input($_GET['status']) : '';
 $date_filter = isset($_GET['date']) ? sanitize_input($_GET['date']) : '';
@@ -238,14 +300,16 @@ $bookings_result = $stmt->get_result();
                                                 break;
                                         }
                                         
-                                        // Check if booking can be cancelled
+                                        // Check if booking can be cancelled or rescheduled
                                         $can_cancel = false;
+                                        $can_reschedule = false;
                                         $booking_date = new DateTime($booking['date']);
                                         $today = new DateTime();
                                         $today->setTime(0, 0, 0);
                                         
-                                        if (($booking['status'] === 'pending' || $booking['status'] === 'confirmed') && $booking_date > $today) {
+                                        if (($booking['status'] === 'pending' || $booking['status'] === 'confirmed') && $booking_date >= $today) {
                                             $can_cancel = true;
+                                            $can_reschedule = true;
                                         }
                                         ?>
                                         <tr>
@@ -262,17 +326,26 @@ $bookings_result = $stmt->get_result();
                                                 <?php echo !empty($booking['admin_remarks']) ? $booking['admin_remarks'] : '-'; ?>
                                             </td>
                                             <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                                                <?php if ($can_cancel): ?>
-                                                    <form method="POST" action="gym_bookings.php" class="inline">
-                                                        <input type="hidden" name="action" value="cancel">
-                                                        <input type="hidden" name="booking_id" value="<?php echo $booking['id']; ?>">
-                                                        <button type="submit" onclick="return confirm('Are you sure you want to cancel this reservation?')" class="text-red-600 hover:text-red-900">
-                                                            Cancel
+                                                <div class="flex justify-end gap-2">
+                                                    <?php if ($can_reschedule): ?>
+                                                        <button onclick="openRescheduleModal(<?php echo htmlspecialchars(json_encode($booking), ENT_QUOTES, 'UTF-8'); ?>)" 
+                                                                class="text-blue-600 hover:text-blue-900" title="Reschedule">
+                                                            <i class="fas fa-calendar-alt"></i> Reschedule
                                                         </button>
-                                                    </form>
-                                                <?php else: ?>
-                                                    -
-                                                <?php endif; ?>
+                                                    <?php endif; ?>
+                                                    <?php if ($can_cancel): ?>
+                                                        <form method="POST" action="gym_bookings.php" class="inline">
+                                                            <input type="hidden" name="action" value="cancel">
+                                                            <input type="hidden" name="booking_id" value="<?php echo $booking['id']; ?>">
+                                                            <button type="submit" onclick="return confirm('Are you sure you want to cancel this reservation?')" class="text-red-600 hover:text-red-900" title="Cancel">
+                                                                <i class="fas fa-times"></i> Cancel
+                                                            </button>
+                                                        </form>
+                                                    <?php endif; ?>
+                                                    <?php if (!$can_reschedule && !$can_cancel): ?>
+                                                        <span class="text-gray-400">-</span>
+                                                    <?php endif; ?>
+                                                </div>
                                             </td>
                                         </tr>
                                     <?php endwhile; ?>

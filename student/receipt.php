@@ -108,6 +108,7 @@ $receipt_number = "RCPT-" . date('Ymd', strtotime($order_datetime)) . "-" . subs
             <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
                 <h1 class="text-2xl font-semibold text-gray-900">Order Receipt</h1>
                 <div class="flex items-center gap-3">
+                    <?php require_once '../includes/notification_bell.php'; ?>
                     <a href="profile.php" class="flex items-center">
                         <?php if (!empty($profile_pic) && file_exists('../' . $profile_pic)): ?>
                             <img src="../<?php echo htmlspecialchars($profile_pic); ?>" alt="Profile" class="w-10 h-10 rounded-full object-cover border-2 border-gray-300 hover:border-blue-500 transition-colors cursor-pointer">

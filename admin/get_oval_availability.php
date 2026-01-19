@@ -69,8 +69,13 @@ try {
     ];
 
     // Get existing bookings for the date (exclude current booking if rescheduling)
+    // Include rescheduled bookings as they are still active reservations
+    // Exclude cancelled and rejected bookings
     $bookings_query = "SELECT start_time, end_time, status FROM bookings 
-                       WHERE facility_type = 'gym' AND date = ? AND status IN ('pending', 'confirmed', 'approved')";
+                       WHERE facility_type = 'oval' 
+                       AND date = ? 
+                       AND status IN ('pending', 'confirmed', 'approved', 'rescheduled')
+                       AND status NOT IN ('cancelled', 'canceled', 'rejected')";
     
     if (!empty($exclude_booking_id)) {
         $bookings_query .= " AND booking_id != ?";

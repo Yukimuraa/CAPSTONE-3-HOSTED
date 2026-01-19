@@ -64,6 +64,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit();
     }
     
+    if ($action === 'reschedule_event') {
+        $event_id = (int)$_POST['event_id'];
+        $event_name = sanitize_input($_POST['event_name']);
+        $event_type = sanitize_input($_POST['event_type']);
+        $start_date = sanitize_input($_POST['start_date']);
+        $end_date = sanitize_input($_POST['end_date']);
+        $description = sanitize_input($_POST['description']);
+        $blocked_for = sanitize_input($_POST['blocked_for_user_types']);
+        $affected_facilities = sanitize_input($_POST['affected_facilities'] ?? 'all');
+        
+        // Validate dates
+        if ($start_date > $end_date) {
+            $_SESSION['error'] = "End date must be after start date.";
+            header("Location: gym_events.php");
+            exit();
+        }
+        
+        $stmt = $conn->prepare("UPDATE gym_blocked_dates SET event_name = ?, event_type = ?, start_date = ?, end_date = ?, description = ?, affected_facilities = ?, blocked_for_user_types = ? WHERE id = ?");
+        $stmt->bind_param("sssssssi", $event_name, $event_type, $start_date, $end_date, $description, $affected_facilities, $blocked_for, $event_id);
+        
+        if ($stmt->execute()) {
+            $_SESSION['success'] = "Event rescheduled successfully!";
+        } else {
+            $_SESSION['error'] = "Error rescheduling event: " . $conn->error;
+        }
+        header("Location: gym_events.php");
+        exit();
+    }
+    
     if ($action === 'update_rules') {
         $allowed_months = sanitize_input($_POST['allowed_months']);
         $is_active = isset($_POST['is_active']) ? 1 : 0;
@@ -319,10 +348,14 @@ $facilities_result = $conn->query($facilities_query);
                                                 </form>
                                             </td>
                                             <td class="px-6 py-4 whitespace-nowrap text-sm">
+                                                <button onclick="openEditModal(<?php echo htmlspecialchars(json_encode($event), ENT_QUOTES, 'UTF-8'); ?>)" 
+                                                        class="text-blue-600 hover:text-blue-900 mr-3" title="Edit/Reschedule">
+                                                    <i class="fas fa-edit"></i>
+                                                </button>
                                                 <form method="POST" class="inline" onsubmit="return confirm('Are you sure you want to delete this event?');">
                                                     <input type="hidden" name="action" value="delete_event">
                                                     <input type="hidden" name="event_id" value="<?php echo $event['id']; ?>">
-                                                    <button type="submit" class="text-red-600 hover:text-red-900">
+                                                    <button type="submit" class="text-red-600 hover:text-red-900" title="Delete">
                                                         <i class="fas fa-trash"></i>
                                                     </button>
                                                 </form>
@@ -342,6 +375,87 @@ $facilities_result = $conn->query($facilities_query);
                 </div>
             </div>
         </main>
+    </div>
+</div>
+
+<!-- Edit Event Modal -->
+<div id="editModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+    <div class="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
+        <div class="mt-3">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-medium text-gray-900">
+                    <i class="fas fa-calendar-edit text-blue-600 mr-2"></i>
+                    Reschedule Event
+                </h3>
+                <button onclick="closeEditModal()" class="text-gray-400 hover:text-gray-600">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            
+            <form method="POST" action="gym_events.php" id="editEventForm">
+                <input type="hidden" name="action" value="reschedule_event">
+                <input type="hidden" name="event_id" id="edit_event_id">
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label for="edit_event_name" class="block text-sm font-medium text-gray-700 mb-1">Event Name *</label>
+                        <input type="text" id="edit_event_name" name="event_name" required 
+                               class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label for="edit_event_type" class="block text-sm font-medium text-gray-700 mb-1">Event Type *</label>
+                        <select id="edit_event_type" name="event_type" required 
+                                class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500">
+                            <option value="ceremony">Ceremony</option>
+                            <option value="intramurals">Intramurals</option>
+                            <option value="school_event">School Event</option>
+                            <option value="maintenance">Maintenance</option>
+                            <option value="other">Other</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="edit_start_date" class="block text-sm font-medium text-gray-700 mb-1">Start Date *</label>
+                        <input type="date" id="edit_start_date" name="start_date" required 
+                               class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label for="edit_end_date" class="block text-sm font-medium text-gray-700 mb-1">End Date *</label>
+                        <input type="date" id="edit_end_date" name="end_date" required 
+                               class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label for="edit_blocked_for_user_types" class="block text-sm font-medium text-gray-700 mb-1">Block For *</label>
+                        <select id="edit_blocked_for_user_types" name="blocked_for_user_types" required 
+                                class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500">
+                            <option value="external">External Users Only</option>
+                            <option value="all">All Users (School Priority)</option>
+                            <option value="student">Students Only</option>
+                            <option value="staff">Staff Only</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="edit_affected_facilities" class="block text-sm font-medium text-gray-700 mb-1">Affected Facilities</label>
+                        <input type="text" value="All Facilities" readonly
+                               class="w-full rounded-md border-gray-300 shadow-sm bg-gray-100 cursor-not-allowed">
+                        <input type="hidden" name="affected_facilities" value="all">
+                    </div>
+                </div>
+                <div class="mb-4">
+                    <label for="edit_description" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                    <textarea id="edit_description" name="description" rows="2" 
+                              class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500"></textarea>
+                </div>
+                <div class="flex justify-end space-x-3">
+                    <button type="button" onclick="closeEditModal()" 
+                            class="bg-gray-300 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-400">
+                        Cancel
+                    </button>
+                    <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700">
+                        <i class="fas fa-save mr-2"></i>Save Changes
+                    </button>
+                </div>
+            </form>
+        </div>
     </div>
 </div>
 

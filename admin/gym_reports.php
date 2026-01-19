@@ -33,6 +33,7 @@ $chart_data = [];
 if ($report_type === 'usage') {
     $start_date = isset($_GET['start_date']) ? sanitize_input($_GET['start_date']) : date('Y-m-d', strtotime('-30 days'));
     $end_date = isset($_GET['end_date']) ? sanitize_input($_GET['end_date']) : date('Y-m-d');
+    $status_filter_usage = isset($_GET['status']) ? sanitize_input($_GET['status']) : '';
     
     // Get usage data with user type breakdown
     $query = "SELECT b.date as booking_date, 'Gymnasium' as facility_name, 
@@ -46,6 +47,26 @@ if ($report_type === 'usage') {
     
     $params = [$start_date, $end_date];
     $types = "ss";
+    
+    // Apply status filter - if no filter, exclude cancelled by default
+    if (!empty($status_filter_usage)) {
+        if ($status_filter_usage === 'approved') {
+            $query .= " AND (b.status = 'approved' OR b.status = 'confirmed')";
+        } elseif ($status_filter_usage === 'pending') {
+            $query .= " AND b.status = 'pending'";
+        } elseif ($status_filter_usage === 'rejected') {
+            $query .= " AND b.status = 'rejected'";
+        } elseif ($status_filter_usage === 'cancelled') {
+            $query .= " AND (b.status = 'cancelled' OR b.status = 'canceled')";
+        } else {
+            $query .= " AND b.status = ?";
+            $params[] = $status_filter_usage;
+            $types .= "s";
+        }
+    } else {
+        // If no status filter, exclude cancelled by default
+        $query .= " AND b.status NOT IN ('cancelled', 'canceled')";
+    }
     
     if ($user_type_filter === 'internal') {
         $query .= " AND u.user_type IN ('student', 'faculty', 'staff')";
@@ -61,46 +82,51 @@ if ($report_type === 'usage') {
     $result = $stmt->get_result();
     
     // Calculate collected amounts for external users
-    $collected_query = "SELECT b.date, b.additional_info
-                        FROM bookings b 
-                        LEFT JOIN user_accounts u ON b.user_id = u.id
-                        WHERE b.facility_type = 'gym' 
-                        AND b.date BETWEEN ? AND ?
-                        AND u.user_type = 'external'
-                        AND (b.status = 'confirmed' OR b.status = 'approved')
-                        AND b.or_number IS NOT NULL 
-                        AND b.or_number != ''
-                        AND b.additional_info IS NOT NULL";
-    
-    $collected_params = [$start_date, $end_date];
-    $collected_types = "ss";
-    
-    if ($user_type_filter === 'external') {
-        // Already filtered by external
-    } elseif ($user_type_filter === 'internal') {
-        // No collected for internal
-        $collected_query = "SELECT b.date, b.additional_info FROM bookings b WHERE 1=0";
-    }
-    
-    $collected_stmt = $conn->prepare($collected_query);
     if ($user_type_filter !== 'internal') {
-        $collected_stmt->bind_param($collected_types, ...$collected_params);
+        $collected_query = "SELECT b.date, b.additional_info
+                            FROM bookings b 
+                            LEFT JOIN user_accounts u ON b.user_id = u.id
+                            WHERE b.facility_type = 'gym' 
+                            AND b.date BETWEEN ? AND ?
+                            AND u.user_type = 'external'
+                            AND (b.status = 'confirmed' OR b.status = 'approved')
+                            AND b.or_number IS NOT NULL 
+                            AND b.or_number != ''
+                            AND b.additional_info IS NOT NULL";
+        
+        $collected_params = [$start_date, $end_date];
+        $collected_types = "ss";
+        
+        // Apply status filter to collected query if set
+        if (!empty($status_filter_usage) && ($status_filter_usage === 'approved' || $status_filter_usage === 'confirmed')) {
+            // Already filtered by approved/confirmed status
+        } elseif (!empty($status_filter_usage)) {
+            // If status filter is not approved, no collected amounts
+            $collected_query = "SELECT b.date, b.additional_info FROM bookings b WHERE 1=0";
+        }
+        
+        $collected_stmt = $conn->prepare($collected_query);
+        if (strpos($collected_query, '1=0') === false) {
+            $collected_stmt->bind_param($collected_types, ...$collected_params);
+        }
         $collected_stmt->execute();
         $collected_result = $collected_stmt->get_result();
         
         $collected_by_date = [];
         $total_collected = 0;
-        while ($collected_row = $collected_result->fetch_assoc()) {
-            $additional_info = json_decode($collected_row['additional_info'] ?? '{}', true) ?: [];
-            $cost_breakdown = $additional_info['cost_breakdown'] ?? [];
-            $total = isset($cost_breakdown['total']) ? (float)$cost_breakdown['total'] : 0;
-            
-            $date_key = $collected_row['date'];
-            if (!isset($collected_by_date[$date_key])) {
-                $collected_by_date[$date_key] = 0;
+        if ($collected_result) {
+            while ($collected_row = $collected_result->fetch_assoc()) {
+                $additional_info = json_decode($collected_row['additional_info'] ?? '{}', true) ?: [];
+                $cost_breakdown = $additional_info['cost_breakdown'] ?? [];
+                $total = isset($cost_breakdown['total']) ? (float)$cost_breakdown['total'] : 0;
+                
+                $date_key = $collected_row['date'];
+                if (!isset($collected_by_date[$date_key])) {
+                    $collected_by_date[$date_key] = 0;
+                }
+                $collected_by_date[$date_key] += $total;
+                $total_collected += $total;
             }
-            $collected_by_date[$date_key] += $total;
-            $total_collected += $total;
         }
     } else {
         $collected_by_date = [];
@@ -126,6 +152,26 @@ if ($report_type === 'usage') {
     
     $chart_params = [$start_date, $end_date];
     $chart_types = "ss";
+    
+    // Apply status filter to chart query - if no filter, exclude cancelled by default
+    if (!empty($status_filter_usage)) {
+        if ($status_filter_usage === 'approved') {
+            $chart_query .= " AND (b.status = 'approved' OR b.status = 'confirmed')";
+        } elseif ($status_filter_usage === 'pending') {
+            $chart_query .= " AND b.status = 'pending'";
+        } elseif ($status_filter_usage === 'rejected') {
+            $chart_query .= " AND b.status = 'rejected'";
+        } elseif ($status_filter_usage === 'cancelled') {
+            $chart_query .= " AND (b.status = 'cancelled' OR b.status = 'canceled')";
+        } else {
+            $chart_query .= " AND b.status = ?";
+            $chart_params[] = $status_filter_usage;
+            $chart_types .= "s";
+        }
+    } else {
+        // If no status filter, exclude cancelled by default
+        $chart_query .= " AND b.status NOT IN ('cancelled', 'canceled')";
+    }
     
     if ($user_type_filter === 'internal') {
         $chart_query .= " AND u.user_type IN ('student', 'faculty', 'staff')";
@@ -492,6 +538,9 @@ if ($report_type === 'usage') {
                         <input type="hidden" name="report_type" value="<?php echo htmlspecialchars($report_type); ?>">
                         
                         <?php if ($report_type === 'usage'): ?>
+                            <?php 
+                            $status_filter_usage = isset($_GET['status']) ? sanitize_input($_GET['status']) : '';
+                            ?>
                             <div>
                                 <label class="block text-sm text-gray-700 mb-1">Start Date</label>
                                 <input type="date" name="start_date" value="<?php echo htmlspecialchars($start_date); ?>" class="w-full rounded-md border-gray-300">
@@ -499,6 +548,16 @@ if ($report_type === 'usage') {
                             <div>
                                 <label class="block text-sm text-gray-700 mb-1">End Date</label>
                                 <input type="date" name="end_date" value="<?php echo htmlspecialchars($end_date); ?>" class="w-full rounded-md border-gray-300">
+                            </div>
+                            <div>
+                                <label class="block text-sm text-gray-700 mb-1">Status</label>
+                                <select name="status" class="w-full rounded-md border-gray-300">
+                                    <option value="">All Statuses</option>
+                                    <option value="pending" <?php echo ($status_filter_usage === 'pending') ? 'selected' : ''; ?>>Pending</option>
+                                    <option value="approved" <?php echo ($status_filter_usage === 'approved') ? 'selected' : ''; ?>>Approved</option>
+                                    <option value="rejected" <?php echo ($status_filter_usage === 'rejected') ? 'selected' : ''; ?>>Rejected</option>
+                                    <option value="cancelled" <?php echo ($status_filter_usage === 'cancelled') ? 'selected' : ''; ?>>Cancelled</option>
+                                </select>
                             </div>
                             <div>
                                 <label class="block text-sm text-gray-700 mb-1">User Type</label>
@@ -552,6 +611,7 @@ if ($report_type === 'usage') {
                                     <option value="pending" <?php echo ($status === 'pending') ? 'selected' : ''; ?>>Pending</option>
                                     <option value="approved" <?php echo ($status === 'approved') ? 'selected' : ''; ?>>Approved</option>
                                     <option value="rejected" <?php echo ($status === 'rejected') ? 'selected' : ''; ?>>Rejected</option>
+                                    <option value="cancelled" <?php echo ($status === 'cancelled') ? 'selected' : ''; ?>>Cancelled</option>
                                 </select>
                             </div>
                             <div>

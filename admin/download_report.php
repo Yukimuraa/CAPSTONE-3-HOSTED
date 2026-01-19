@@ -277,6 +277,8 @@ switch ($report_type) {
     case 'gym':
         $report_type_param = isset($_GET['report_type']) ? sanitize_input($_GET['report_type']) : '';
         $user_type_filter = isset($_GET['user_type']) ? sanitize_input($_GET['user_type']) : '';
+        // Get status filter at the top level so it's accessible in PDF/Excel sections
+        $status_filter = isset($_GET['status']) ? sanitize_input($_GET['status']) : '';
         
         // Handle different gym report types from gym_reports.php
         if ($report_type_param === 'usage') {
@@ -284,7 +286,17 @@ switch ($report_type) {
             $end_date = isset($_GET['end_date']) ? sanitize_input($_GET['end_date']) : date('Y-m-d');
             
             $title = 'Gym Usage Report';
-            $headers = ['Date', 'Facility', 'Total Bookings', 'Internal', 'External', 'Number of Attendees'];
+            $headers = ['Date', 'Facility', 'Total Bookings', 'Number of Attendees'];
+            
+            // Only add Internal header if not filtering external only
+            if ($user_type_filter !== 'external') {
+                $headers[] = 'Internal';
+            }
+            
+            // Only add External header if not filtering internal only
+            if ($user_type_filter !== 'internal') {
+                $headers[] = 'External';
+            }
             
             // Only add Collected header if showing external or all users
             if ($user_type_filter !== 'internal') {
@@ -303,6 +315,26 @@ switch ($report_type) {
             $params = [$start_date, $end_date];
             $types = "ss";
             
+            // Apply status filter - if no filter, exclude cancelled by default
+            if (!empty($status_filter)) {
+                if ($status_filter === 'approved') {
+                    $query .= " AND (b.status = 'approved' OR b.status = 'confirmed')";
+                } elseif ($status_filter === 'pending') {
+                    $query .= " AND b.status = 'pending'";
+                } elseif ($status_filter === 'rejected') {
+                    $query .= " AND b.status = 'rejected'";
+                } elseif ($status_filter === 'cancelled') {
+                    $query .= " AND (b.status = 'cancelled' OR b.status = 'canceled')";
+                } else {
+                    $query .= " AND b.status = ?";
+                    $params[] = $status_filter;
+                    $types .= "s";
+                }
+            } else {
+                // If no status filter, exclude cancelled by default
+                $query .= " AND b.status NOT IN ('cancelled', 'canceled')";
+            }
+            
             if ($user_type_filter === 'internal') {
                 $query .= " AND u.user_type IN ('student', 'faculty', 'staff')";
             } elseif ($user_type_filter === 'external') {
@@ -316,30 +348,49 @@ switch ($report_type) {
             $stmt->execute();
             $result = $stmt->get_result();
             
-            // Get collected amounts (external only)
-            $collected_query = "SELECT b.date, b.additional_info
-                                FROM bookings b 
-                                LEFT JOIN user_accounts u ON b.user_id = u.id
-                                WHERE b.facility_type = 'gym' 
-                                AND b.date BETWEEN ? AND ?
-                                AND u.user_type = 'external'
-                                AND (b.status = 'confirmed' OR b.status = 'approved')
-                                AND b.or_number IS NOT NULL 
-                                AND b.or_number != ''
-                                AND b.additional_info IS NOT NULL";
-            
-            $collected_stmt = $conn->prepare($collected_query);
-            $collected_stmt->bind_param($types, ...$params);
-            $collected_stmt->execute();
-            $collected_result = $collected_stmt->get_result();
+            // Get collected amounts (external only) - skip if internal filter
+            if ($user_type_filter !== 'internal') {
+                $collected_query = "SELECT b.date, b.additional_info
+                                    FROM bookings b 
+                                    LEFT JOIN user_accounts u ON b.user_id = u.id
+                                    WHERE b.facility_type = 'gym' 
+                                    AND b.date BETWEEN ? AND ?
+                                    AND u.user_type = 'external'
+                                    AND (b.status = 'confirmed' OR b.status = 'approved')
+                                    AND b.or_number IS NOT NULL 
+                                    AND b.or_number != ''
+                                    AND b.additional_info IS NOT NULL";
+                
+                $collected_params = [$start_date, $end_date];
+                $collected_types = "ss";
+                
+                // Apply status filter to collected query if set
+                if (!empty($status_filter) && ($status_filter === 'approved' || $status_filter === 'confirmed')) {
+                    // Already filtered by approved/confirmed status
+                } elseif (!empty($status_filter)) {
+                    // If status filter is not approved, no collected amounts
+                    $collected_query = "SELECT b.date, b.additional_info FROM bookings b WHERE 1=0";
+                }
+                
+                $collected_stmt = $conn->prepare($collected_query);
+                if (strpos($collected_query, '1=0') === false) {
+                    $collected_stmt->bind_param($collected_types, ...$collected_params);
+                }
+                $collected_stmt->execute();
+                $collected_result = $collected_stmt->get_result();
+            } else {
+                $collected_result = null;
+            }
             
             $collected_by_date = [];
-            while ($collected_row = $collected_result->fetch_assoc()) {
-                if (!empty($collected_row['additional_info'])) {
-                    $additional_info = json_decode($collected_row['additional_info'], true);
-                    if (isset($additional_info['cost_breakdown']['total'])) {
-                        $date = $collected_row['date'];
-                        $collected_by_date[$date] = ($collected_by_date[$date] ?? 0) + (float)$additional_info['cost_breakdown']['total'];
+            if ($collected_result) {
+                while ($collected_row = $collected_result->fetch_assoc()) {
+                    if (!empty($collected_row['additional_info'])) {
+                        $additional_info = json_decode($collected_row['additional_info'], true);
+                        if (isset($additional_info['cost_breakdown']['total'])) {
+                            $date = $collected_row['date'];
+                            $collected_by_date[$date] = ($collected_by_date[$date] ?? 0) + (float)$additional_info['cost_breakdown']['total'];
+                        }
                     }
                 }
             }
@@ -362,11 +413,20 @@ switch ($report_type) {
                     date('F j, Y', strtotime($row['booking_date'])),
                     $row['facility_name'],
                     number_format($row['booking_count']),
-                    number_format($row['internal_count'] ?? 0),
-                    number_format($row['external_count'] ?? 0),
                     number_format($row['total_attendees'] ?? 0)
                 ];
                 
+                // Only add Internal column if not filtering external only
+                if ($user_type_filter !== 'external') {
+                    $row_data[] = number_format($row['internal_count'] ?? 0);
+                }
+                
+                // Only add External column if not filtering internal only
+                if ($user_type_filter !== 'internal') {
+                    $row_data[] = number_format($row['external_count'] ?? 0);
+                }
+                
+                // Only add Collected column if not filtering internal only
                 if ($user_type_filter !== 'internal') {
                     $row_data[] = '₱' . number_format($collected, 2);
                 }
@@ -374,26 +434,48 @@ switch ($report_type) {
                 $data[] = $row_data;
             }
             
-            // Add total row only for external or all users
-            if ($user_type_filter !== 'internal' && !empty($data)) {
-                $total_row = ['Total', '', number_format($total_bookings), number_format($total_internal), number_format($total_external), number_format($total_attendees)];
+            // Add total row
+            if (!empty($data)) {
+                $total_row = ['Total', '', number_format($total_bookings), number_format($total_attendees)];
+                
+                // Only add Internal total if not filtering external only
+                if ($user_type_filter !== 'external') {
+                    $total_row[] = number_format($total_internal);
+                }
+                
+                // Only add External total if not filtering internal only
+                if ($user_type_filter !== 'internal') {
+                    $total_row[] = number_format($total_external);
+                }
+                
+                // Only add Collected total if not filtering internal only
                 if ($user_type_filter !== 'internal') {
                     $total_row[] = '₱' . number_format($total_collected, 2);
                 }
-                $data[] = $total_row;
-            } elseif ($user_type_filter === 'internal' && !empty($data)) {
-                $total_row = ['Total', '', number_format($total_bookings), number_format($total_internal), number_format($total_external), number_format($total_attendees)];
+                
                 $data[] = $total_row;
             }
             
         } elseif ($report_type_param === 'status') {
             $start_date = isset($_GET['start_date']) ? sanitize_input($_GET['start_date']) : date('Y-m-d', strtotime('-1 month'));
             $end_date = isset($_GET['end_date']) ? sanitize_input($_GET['end_date']) : date('Y-m-d');
-            $status = isset($_GET['status']) ? sanitize_input($_GET['status']) : '';
+            // Use the status_filter variable defined at top level
+            $status = $status_filter;
             
             $title = 'Booking Status Report';
-            $headers = ['Status', 'Facility', 'Total Bookings', 'Internal', 'External', 'Number of Attendees'];
+            $headers = ['Status', 'Facility', 'Total Bookings', 'Number of Attendees'];
             
+            // Only add Internal header if not filtering external only
+            if ($user_type_filter !== 'external') {
+                $headers[] = 'Internal';
+            }
+            
+            // Only add External header if not filtering internal only
+            if ($user_type_filter !== 'internal') {
+                $headers[] = 'External';
+            }
+            
+            // Only add Collected header if not filtering internal only
             if ($user_type_filter !== 'internal') {
                 $headers[] = 'Collected';
             }
@@ -409,14 +491,24 @@ switch ($report_type) {
             $params = [$start_date, $end_date];
             $types = "ss";
             
+            // Apply status filter - if empty, show all statuses (pending, approved, rejected, cancelled)
             if (!empty($status)) {
                 if ($status === 'approved') {
                     $query .= " AND (b.status = 'approved' OR b.status = 'confirmed')";
+                } elseif ($status === 'pending') {
+                    $query .= " AND b.status = 'pending'";
+                } elseif ($status === 'rejected') {
+                    $query .= " AND b.status = 'rejected'";
+                } elseif ($status === 'cancelled') {
+                    $query .= " AND (b.status = 'cancelled' OR b.status = 'canceled')";
                 } else {
                     $query .= " AND b.status = ?";
                     $params[] = $status;
                     $types .= "s";
                 }
+            } else {
+                // Show all statuses: pending, approved, confirmed, rejected, cancelled, canceled
+                $query .= " AND b.status IN ('pending', 'approved', 'confirmed', 'rejected', 'cancelled', 'canceled', 'rescheduled')";
             }
             
             if ($user_type_filter === 'internal') {
@@ -432,46 +524,57 @@ switch ($report_type) {
             $stmt->execute();
             $result = $stmt->get_result();
             
-            // Get collected by status
-            $collected_query = "SELECT b.status, b.additional_info
-                                FROM bookings b 
-                                LEFT JOIN user_accounts u ON b.user_id = u.id
-                                WHERE b.facility_type = 'gym' 
-                                AND b.date BETWEEN ? AND ?
-                                AND u.user_type = 'external'
-                                AND (b.status = 'confirmed' OR b.status = 'approved')
-                                AND b.or_number IS NOT NULL 
-                                AND b.or_number != ''
-                                AND b.additional_info IS NOT NULL";
-            
-            $collected_params = [$start_date, $end_date];
-            $collected_types = "ss";
-            
-            if (!empty($status)) {
-                if ($status === 'approved') {
-                    $collected_query .= " AND (b.status = 'approved' OR b.status = 'confirmed')";
-                } else {
-                    $collected_query .= " AND b.status = ?";
-                    $collected_params[] = $status;
-                    $collected_types .= "s";
+            // Get collected by status (external only) - skip if internal filter
+            if ($user_type_filter !== 'internal') {
+                $collected_query = "SELECT b.status, b.additional_info
+                                    FROM bookings b 
+                                    LEFT JOIN user_accounts u ON b.user_id = u.id
+                                    WHERE b.facility_type = 'gym' 
+                                    AND b.date BETWEEN ? AND ?
+                                    AND u.user_type = 'external'
+                                    AND (b.status = 'confirmed' OR b.status = 'approved')
+                                    AND b.or_number IS NOT NULL 
+                                    AND b.or_number != ''
+                                    AND b.additional_info IS NOT NULL";
+                
+                $collected_params = [$start_date, $end_date];
+                $collected_types = "ss";
+                
+                if (!empty($status)) {
+                    if ($status === 'approved') {
+                        $collected_query .= " AND (b.status = 'approved' OR b.status = 'confirmed')";
+                    } elseif ($status === 'pending' || $status === 'rejected' || $status === 'cancelled') {
+                        // No collected for pending, rejected, or cancelled
+                        $collected_query = "SELECT b.status, b.additional_info FROM bookings b WHERE 1=0";
+                    } else {
+                        $collected_query .= " AND b.status = ?";
+                        $collected_params[] = $status;
+                        $collected_types .= "s";
+                    }
                 }
+                
+                $collected_stmt = $conn->prepare($collected_query);
+                if (strpos($collected_query, '1=0') === false) {
+                    $collected_stmt->bind_param($collected_types, ...$collected_params);
+                }
+                $collected_stmt->execute();
+                $collected_result = $collected_stmt->get_result();
+            } else {
+                $collected_result = null;
             }
-            
-            $collected_stmt = $conn->prepare($collected_query);
-            $collected_stmt->bind_param($collected_types, ...$collected_params);
-            $collected_stmt->execute();
-            $collected_result = $collected_stmt->get_result();
             
             $collected_by_status = [];
             $total_collected = 0;
-            while ($collected_row = $collected_result->fetch_assoc()) {
-                if (!empty($collected_row['additional_info'])) {
-                    $additional_info = json_decode($collected_row['additional_info'], true);
-                    if (isset($additional_info['cost_breakdown']['total'])) {
-                        $status_key = $collected_row['status'];
-                        $amount = (float)$additional_info['cost_breakdown']['total'];
-                        $collected_by_status[$status_key] = ($collected_by_status[$status_key] ?? 0) + $amount;
-                        $total_collected += $amount;
+            if ($collected_result) {
+                while ($collected_row = $collected_result->fetch_assoc()) {
+                    if (!empty($collected_row['additional_info'])) {
+                        $additional_info = json_decode($collected_row['additional_info'], true);
+                        if (isset($additional_info['cost_breakdown']['total'])) {
+                            $status_key = $collected_row['status'];
+                            $amount = (float)$additional_info['cost_breakdown']['total'];
+                            $collected_by_status[$status_key] = ($collected_by_status[$status_key] ?? 0) + $amount;
+                            $total_collected += $amount;
+                        }
                     }
                 }
             }
@@ -498,11 +601,20 @@ switch ($report_type) {
                     $status_display,
                     $row['facility_name'],
                     number_format($row['booking_count']),
-                    number_format($row['internal_count'] ?? 0),
-                    number_format($row['external_count'] ?? 0),
                     number_format($row['total_attendees'] ?? 0)
                 ];
                 
+                // Only add Internal column if not filtering external only
+                if ($user_type_filter !== 'external') {
+                    $row_data[] = number_format($row['internal_count'] ?? 0);
+                }
+                
+                // Only add External column if not filtering internal only
+                if ($user_type_filter !== 'internal') {
+                    $row_data[] = number_format($row['external_count'] ?? 0);
+                }
+                
+                // Only add Collected column if not filtering internal only
                 if ($user_type_filter !== 'internal') {
                     $row_data[] = '₱' . number_format($collected, 2);
                 }
@@ -510,15 +622,25 @@ switch ($report_type) {
                 $data[] = $row_data;
             }
             
-            // Add total row only for external or all users
-            if ($user_type_filter !== 'internal' && !empty($data)) {
-                $total_row = ['Total', '', number_format($total_bookings), number_format($total_internal), number_format($total_external), number_format($total_attendees)];
+            // Add total row
+            if (!empty($data)) {
+                $total_row = ['Total', '', number_format($total_bookings), number_format($total_attendees)];
+                
+                // Only add Internal total if not filtering external only
+                if ($user_type_filter !== 'external') {
+                    $total_row[] = number_format($total_internal);
+                }
+                
+                // Only add External total if not filtering internal only
+                if ($user_type_filter !== 'internal') {
+                    $total_row[] = number_format($total_external);
+                }
+                
+                // Only add Collected total if not filtering internal only
                 if ($user_type_filter !== 'internal') {
                     $total_row[] = '₱' . number_format($total_collected, 2);
                 }
-                $data[] = $total_row;
-            } elseif ($user_type_filter === 'internal' && !empty($data)) {
-                $total_row = ['Total', '', number_format($total_bookings), number_format($total_internal), number_format($total_external), number_format($total_attendees)];
+                
                 $data[] = $total_row;
             }
             
@@ -530,7 +652,7 @@ switch ($report_type) {
         // Get date filters
         $start_date = isset($_GET['start_date']) ? sanitize_input($_GET['start_date']) : date('Y-m-d', strtotime('-30 days'));
         $end_date = isset($_GET['end_date']) ? sanitize_input($_GET['end_date']) : date('Y-m-d');
-        $status_filter = isset($_GET['status']) ? sanitize_input($_GET['status']) : '';
+        // Use the status_filter variable defined at top level
         
         // Build query to get detailed booking information
         $query = "SELECT b.booking_id, b.status, b.date, b.start_time, b.end_time, b.purpose, b.attendees, 
@@ -898,11 +1020,40 @@ if ($format === 'pdf') {
     </div>';
         
         // Add filter info if available
-        if (!empty($start_date) || !empty($end_date) || !empty($status)) {
+        // For gym reports, check status_filter from GET or from variable scope
+        // For other reports, use status variable
+        $display_status = '';
+        $display_user_type = '';
+        
+        // Check for status filter - try multiple ways to get it
+        if ($report_type === 'gym') {
+            // First try the variable if it exists
+            if (isset($status_filter) && !empty($status_filter)) {
+                $display_status = $status_filter;
+            } elseif (isset($_GET['status']) && !empty($_GET['status'])) {
+                // Fallback to GET parameter
+                $display_status = sanitize_input($_GET['status']);
+            }
+            
+            // Get user type filter
+            if (isset($user_type_filter) && !empty($user_type_filter)) {
+                $display_user_type = $user_type_filter;
+            } elseif (isset($_GET['user_type']) && !empty($_GET['user_type'])) {
+                $display_user_type = sanitize_input($_GET['user_type']);
+            }
+        } elseif (isset($status) && !empty($status)) {
+            $display_status = $status;
+        }
+        
+        if (!empty($start_date) || !empty($end_date) || !empty($display_status) || !empty($display_user_type)) {
             echo '<div class="info">';
             if (!empty($start_date)) echo '<strong>Start Date:</strong> ' . date('F j, Y', strtotime($start_date)) . ' | ';
             if (!empty($end_date)) echo '<strong>End Date:</strong> ' . date('F j, Y', strtotime($end_date)) . ' | ';
-            if (!empty($status)) echo '<strong>Status:</strong> ' . ucfirst($status);
+            if (!empty($display_status)) echo '<strong>Status:</strong> ' . ucfirst($display_status) . ' | ';
+            if (!empty($display_user_type)) {
+                $user_type_label = ($display_user_type === 'internal') ? 'Internal Users' : (($display_user_type === 'external') ? 'External Users' : 'All Users');
+                echo '<strong>User Type:</strong> ' . $user_type_label;
+            }
             echo '</div>';
         }
         
@@ -1089,8 +1240,20 @@ if ($format === 'pdf') {
         }
         
         // Handle other filters
-        if (!empty($status)) {
-            $period_info[] = 'Status: ' . ucfirst($status);
+        // For gym reports, use status_filter (defined at top of gym case)
+        // For other reports, use status variable
+        $display_status = '';
+        if ($report_type === 'gym' && isset($status_filter)) {
+            $display_status = $status_filter;
+        } elseif (isset($status)) {
+            $display_status = $status;
+        }
+        if (!empty($display_status)) {
+            $period_info[] = 'Status: ' . ucfirst($display_status);
+        }
+        if (!empty($user_type_filter) && $report_type === 'gym') {
+            $user_type_label = ($user_type_filter === 'internal') ? 'Internal Users' : (($user_type_filter === 'external') ? 'External Users' : 'All Users');
+            $period_info[] = 'User Type: ' . $user_type_label;
         }
         if (!empty($role)) {
             $period_info[] = 'Role: ' . ucfirst($role);
@@ -1454,8 +1617,20 @@ if ($format === 'pdf') {
         } elseif (!empty($end_date)) {
             $period_info[] = 'To: ' . date('F j, Y', strtotime($end_date));
         }
-        if (!empty($status)) {
-            $period_info[] = 'Status: ' . ucfirst($status);
+        // For gym reports, use status_filter (defined at top of gym case)
+        // For other reports, use status variable
+        $display_status = '';
+        if ($report_type === 'gym' && isset($status_filter)) {
+            $display_status = $status_filter;
+        } elseif (isset($status)) {
+            $display_status = $status;
+        }
+        if (!empty($display_status)) {
+            $period_info[] = 'Status: ' . ucfirst($display_status);
+        }
+        if (!empty($user_type_filter) && $report_type === 'gym') {
+            $user_type_label = ($user_type_filter === 'internal') ? 'Internal Users' : (($user_type_filter === 'external') ? 'External Users' : 'All Users');
+            $period_info[] = 'User Type: ' . $user_type_label;
         }
         if (!empty($role)) {
             $period_info[] = 'Role: ' . ucfirst($role);
